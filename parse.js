@@ -471,6 +471,40 @@ function maskCodeSpans(s) {
   return spans;
 }
 
+// marked's emStrong mask, step 2: escapes become '+' runs and the
+// backticks inside a code span become '+', so a span's inner backtick no
+// longer looks like a delimiter boundary.
+const ANY_PUNCT_OUTSIDE_CODE = /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\([\p{P}\p{S}])/gu;
+function step2Source(s) {
+  return s.replace(ANY_PUNCT_OUTSIDE_CODE, (n, g1, g2) => g2 ? '+'.repeat(n.length) : g1 ? g1 + n.slice(g1.length, -g1.length).replace(/`/g, '+') + g1 : n);
+}
+
+// The inline links marked's emStrong mask hides (blockSkip's link
+// pattern, run over the step-2 source): a "[label](dest)" whose label is
+// code spans with matching runs and plain text. Such a span is masked
+// whole, so its label's delimiters never reach the emphasis resolver —
+// even when the link itself does not form (its label fails the link
+// regex, e.g. a code span with an inner backtick). The span is returned
+// in source coordinates (step 2 is length-preserving).
+const BLOCK_SKIP_LINK = /\[(?:[^\[\]`]|(`+)[^`]+\1(?!`))*?\]\((?:\\[\s\S]|[^\\()]|\((?:\\[\s\S]|[^\\()])*\))*\)/g;
+function maskInlineLinks(s) {
+  const t = step2Source(s);
+  const codeSpans = maskCodeSpans(s);
+  const spans = [];
+  BLOCK_SKIP_LINK.lastIndex = 0;
+  let m;
+  while ((m = BLOCK_SKIP_LINK.exec(t)) !== null) {
+    const start = m.index;
+    // A "[...](...)" inside a code span is code, not a link.
+    let inside = false;
+    for (let k = 0; k < codeSpans.length; k++) {
+      if (start >= codeSpans[k].s && start < codeSpans[k].e) { inside = true; break; }
+    }
+    if (!inside) spans.push({ s: start, e: start + m[0].length });
+  }
+  return spans;
+}
+
 // Parse a link label "[...]" starting at s[i] === '['. Returns { label, next }
 // (label is the raw text between the brackets) or null.
 function parseLinkLabel(s, i) {
@@ -971,6 +1005,17 @@ function scanInline(src, refs, doc) {
   // the mask's characters ('[', 'a', ']') as its neighbours. Returns the
   // masked code point at `pos`, or -1 when `pos` is not inside a span.
   const maskSpans = maskCodeSpans(src);
+  // Inline links the emphasis mask hides whole (see maskInlineLinks):
+  // a delimiter inside one never reaches the resolver, unless the link
+  // actually forms (then the label is resolved on its own and the flag
+  // is cleared on the label's items).
+  const linkSpans = maskInlineLinks(src);
+  const inLinkSpan = (pos) => {
+    for (let m = 0; m < linkSpans.length; m++) {
+      if (pos >= linkSpans[m].s && pos < linkSpans[m].e) return true;
+    }
+    return false;
+  };
   const maskedCpAt = (pos) => {
     for (let m = 0; m < maskSpans.length; m++) {
       const sp = maskSpans[m];
@@ -1099,7 +1144,14 @@ function scanInline(src, refs, doc) {
       while (i + run < n && src.charCodeAt(i + run) === c) run++;
       const { p, q } = delimCtx(i, run);
       flushText();
-      items.push({ d: c, n: run, p, q });
+      const it = { d: c, n: run, p, q };
+      // Hidden by the mask: inside a "[...](...)" the mask treats as a
+      // link, or inside a code span the mask sees — including a span
+      // whose opener sits inside a link label while its content runs
+      // past the link (marked's blockSkip code regex pairs the runs
+      // without knowing the link formed there).
+      if (inLinkSpan(i) || maskedCpAt(i) !== -1) it.hid = true;
+      items.push(it);
       i += run;
       continue;
     }
@@ -1111,7 +1163,9 @@ function scanInline(src, refs, doc) {
       while (i + run < n && src.charCodeAt(i + run) === 126) run++;
       const { p, q } = delimCtx(i, run);
       flushText();
-      items.push({ d: 126, n: run, p, q });
+      const it = { d: 126, n: run, p, q };
+      if (inLinkSpan(i) || maskedCpAt(i) !== -1) it.hid = true;
+      items.push(it);
       i += run;
       continue;
     }
@@ -1212,6 +1266,11 @@ function scanInline(src, refs, doc) {
       }
       flushText();
       const children = items.slice(br.idx + 1);
+      // The label is resolved on its own, so its delimiters are no longer
+      // hidden by the paragraph-level link mask.
+      for (const ch of children) {
+        if (typeof ch === 'object' && ch !== null && ch.d !== undefined) delete ch.hid;
+      }
       // A GFM candidate inside the link text may span past the closing ]
       // (its URL matched the ](dest) too). Truncate its text at the ].
       for (const ch of children) {
@@ -1391,6 +1450,10 @@ function tryMatchDelim(items, oi) {
   const k = opener.n;
   const isDel = r === 126;
   if (isDel && k > 2) return -1; // 3+ tildes never form <del>
+  // A delimiter the emphasis mask hides (inside a "[...](...)" the mask
+  // treats as a link, or inside a code span the mask sees) never opens:
+  // the mask replaced it with 'a'.
+  if (opener.hid) return -1;
   // A retry (a run shortened after a failed attempt) sees the character
   // before the original run as its previous character, and always counts
   // as preceded by its own character.
@@ -1431,7 +1494,7 @@ function tryMatchDelim(items, oi) {
     const advance = () => {
       while (j < items.length) {
         const it = items[j];
-        if (it !== null && typeof it === 'object' && it.d !== undefined && (it.d === 42 || it.d === 95)) return true;
+        if (it !== null && typeof it === 'object' && it.d !== undefined && !it.hid && (it.d === 42 || it.d === 95)) return true;
         if (it !== null && typeof it === 'object' && it.g !== undefined && (it.t.indexOf('*') !== -1 || it.t.indexOf('_') !== -1)) return false;
         j++;
       }
@@ -1458,7 +1521,7 @@ function tryMatchDelim(items, oi) {
   for (let ci = oi + 1; ci < items.length; ci++) {
     if (ci === skipIdx) continue;
     const cand = items[ci];
-    if (cand === null || typeof cand !== 'object' || cand.d !== r) continue;
+    if (cand === null || typeof cand !== 'object' || cand.d !== r || cand.hid) continue;
     const b = cand.n;
     if (isDel && b !== k) continue; // del only matches equal-length runs
     const cpc = delimClass(cand.p, tildeWord);
@@ -1543,6 +1606,7 @@ function resolveEmphasis(items) {
           y: it.y !== undefined ? it.y : it.n,
           retry: true,
         };
+        if (it.hid) rest.hid = true;
         items.splice(di, 1, String.fromCodePoint(it.d), rest);
         di++; // move to the shortened run
       } else {
@@ -2209,6 +2273,13 @@ function parseBlocks(lines, srcEndsNL) {
   // The marker-line prevM, used by startParagraph when the paragraph is the
   // first block of a list item started on this line.
   let pendingItemPrevM = null;
+  // An html block closed by an empty blank line, awaiting its trailing-\n
+  // verdict: marked's html text keeps one \n only when the blank line is
+  // the last line of the block's lexing context (the quote's inner text,
+  // or a non-last list item's text — the last item's text is trimEnd'd).
+  // The next line decides; at most one is ever pending, since every line
+  // resolves it one way or the other. { node, parentIdx, parentType }
+  let pendingHtml = null;
 
   const innermost = () => stack[stack.length - 1];
 
@@ -2261,6 +2332,54 @@ function parseBlocks(lines, srcEndsNL) {
   function popTo(depth) {
     closeLeaf();
     while (stack.length > depth) stack.pop();
+  }
+
+  // Does the current line (after the matched containers) start a new item
+  // of the list frame at stack[listIdx]? Used to tell a non-last list item
+  // (its text keeps the trailing blank line) from the last one (trimEnd).
+  function lineStartsSameListItem(listIdx) {
+    if (listIdx < 1 || listIdx >= stack.length) return false;
+    const list = stack[listIdx];
+    if (list.t !== 'list') return false;
+    if (isHrLine(curRest(cur)) !== 0) return false; // hr beats a list marker
+    const saveI = cur.i;
+    const saveCol = cur.col;
+    const saveTab = cur.tab;
+    const m = parseListMarker();
+    cur.i = saveI;
+    cur.col = saveCol;
+    cur.tab = saveTab;
+    return m !== null && m.ordered === list.ordered && m.bullet === list.bullet;
+  }
+
+  // Resolve a pending html trailing-\n verdict with this line (its
+  // containers were just matched). A line inside the block's lexing
+  // context means 2+ newlines follow the block (no \n); the context
+  // ending means the blank line was its last line.
+  function resolvePendingHtml(matched) {
+    const ph = pendingHtml;
+    pendingHtml = null;
+    const parentGone = stack.length <= ph.parentIdx;
+    if (ph.parentType === 'q') {
+      // A line matching the quote is inside its inner text; otherwise
+      // the quote ended and the blank line was its last line (\n kept:
+      // the inner text is line-joined, so exactly one \n survives).
+      ph.node.trailNL = !parentGone && matched > ph.parentIdx ? false : true;
+    } else if (ph.parentType === 'item') {
+      if (curRestBlank(cur)) {
+        // Another blank line: 2+ newlines in the item text — or the
+        // list ends and this is the last item (trimEnd). No \n either way.
+        ph.node.trailNL = false;
+      } else if (!parentGone && matched > ph.parentIdx) {
+        ph.node.trailNL = false; // continuation line inside the item
+      } else {
+        // The item ends here: \n only when another item of the same
+        // list follows (a non-last item keeps its trailing blank line).
+        ph.node.trailNL = lineStartsSameListItem(ph.parentIdx - 1);
+      }
+    } else {
+      ph.node.trailNL = false; // top level: any later line means 2+ newlines
+    }
   }
 
   function addLeaf(node, keepOpen) {
@@ -2465,6 +2584,7 @@ function parseBlocks(lines, srcEndsNL) {
     }
 
     // ---- Phase 2: blank content (after the matched containers). ----
+    if (pendingHtml !== null) resolvePendingHtml(matched);
     if (curRestBlank(cur)) {
       // A trailing spaces-only line in a quote, on the last line of the
       // input, is a paragraph continuation, not a blank line: the quote's
@@ -2510,11 +2630,28 @@ function parseBlocks(lines, srcEndsNL) {
           }
         } else if (node.t === 'html') {
           if (node.ended) {
-            // The block keeps its trailing \n when the blank line is
-            // inside a quote (the quote's inner text joins a \n onto it)
-            // or when the blank line itself holds whitespace (a truly
-            // empty line swallows the \n via the (\n+) in the html match).
-            node.trailNL = insideLeaf && (deepestQuote >= 0 || curRest(cur) !== '');
+            // The block keeps its trailing \n only when exactly one \n
+            // follows it in its lexing context (marked's html regex
+            // takes the following newlines, and its trim keeps at most
+            // one). A blank line outside the context means the block is
+            // the context's last thing, and no context ends with \n
+            // except the document (which a blank line never leaves). A
+            // blank line with whitespace content stops the run at one
+            // \n. An empty blank line inside the context keeps the \n
+            // only when it is the context's last line — the next line
+            // decides (see pendingHtml).
+            if (!insideLeaf) {
+              node.trailNL = false;
+            } else {
+              const parentIdx = openLeaf.depth - 1;
+              const blankContent = matched > parentIdx ? curRest(cur) : '';
+              if (blankContent !== '') {
+                node.trailNL = true;
+              } else {
+                node.trailNL = 'pending';
+                pendingHtml = { node, parentIdx, parentType: openLeaf.parent.t };
+              }
+            }
             closeLeaf();
           } else if (node.type === 6 || node.type === 7) {
             node.trailNL = false;
@@ -2568,6 +2705,14 @@ function parseBlocks(lines, srcEndsNL) {
   }
 
   // ---- EOF: close everything. ----
+  if (pendingHtml !== null) {
+    // EOF: the blank line was the context's last line only for a quote
+    // (its inner text is line-joined, so one \n survives); a top-level
+    // block sees 2+ newlines, and a list item at EOF is the last item
+    // (its text is trimEnd'd).
+    pendingHtml.node.trailNL = pendingHtml.parentType === 'q';
+    pendingHtml = null;
+  }
   closeLeaf();
 
   return { root, refs };
@@ -3467,7 +3612,7 @@ function renderBlock(node, refs, out, doc) {
     }
     case 'html': {
       out.push(node.lines.join('\n'));
-      if (node.trailNL) out.push('\n');
+      if (node.trailNL === true) out.push('\n');
       break;
     }
     case 'table': {
