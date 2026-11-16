@@ -2603,12 +2603,46 @@ function parseBlocks(lines, endsWithNL, ctx) {
       blankFrom(line, offset) &&
       (offset >= line.length || !matchedContainer);
     if (isBlank) {
-      finalizeUpTo(container);
-      pbLastBlank = li;
-      pbBlankWasItem = container.t === 'item';
-      // A blank line closes an empty list item.
-      if (container.t === 'item' && container.ch.length === 0) {
-        finalizeBlock(container);
+      // A whitespace-only line containing a tab does not end a table
+      // paragraph: marked treats it as an empty table row. (A
+      // spaces-only line does end the table.)
+      if (line.indexOf('\t', offset) >= 0) {
+        const tip = deepestOpen();
+        if (tip.t === 'para' && tip.lines.length >= 2) {
+          const aligns = parseDelimRow(tip.lines[1]);
+          const header = splitTableRow(tip.lines[0]);
+          if (aligns && aligns.length === header.length) {
+            tip.lines.push('');
+            continue;
+          }
+        }
+      }
+      if (matchedContainer) {
+        // The blank line matched a container (e.g. `>` or a list
+        // item): it ends the open leaf (paragraph) but not the
+        // containers, which stay open until a later non-blank line
+        // fails to match them.
+        const tip = deepestOpen();
+        if (
+          tip.t === 'para' ||
+          tip.t === 'head' ||
+          tip.t === 'code' ||
+          tip.t === 'html'
+        ) {
+          finalizeBlock(tip);
+        }
+        pbLastBlank = li;
+        pbBlankWasItem =
+          container.t === 'item' || (tip.parent && tip.parent.t === 'item');
+        // A blank line closes an empty list item.
+        if (container.t === 'item' && container.ch.length === 0) {
+          finalizeBlock(container);
+        }
+      } else {
+        // A truly blank line (no container matched) closes everything.
+        finalizeUpTo(container);
+        pbLastBlank = li;
+        pbBlankWasItem = false;
       }
       continue;
     }
@@ -2823,7 +2857,13 @@ function parseBlocks(lines, endsWithNL, ctx) {
     }
   }
 
-  finalizeUpTo(root);
+  // Finalize every still-open block (not just the deepest path:
+  // a sibling list left open when a paragraph followed it must also
+  // get its tight/loose computation).
+  (function finalizeAll(b) {
+    for (let i = b.ch.length - 1; i >= 0; i--) finalizeAll(b.ch[i]);
+    if (b.open) finalizeBlock(b);
+  })(root);
   return root;
 }
 
