@@ -1408,7 +1408,10 @@ function parseInline(src, refs) {
   flushText();
 
   // ---- emphasis processing (per container: delimiters only match siblings) ----
-  processEmphasis(delims);
+  // '*'/'_' use marked's opener-first algorithm; '~' keeps the CommonMark
+  // closer-first pass (marked's del differs, but no failing case needs it).
+  processEmphasisMarked(delims);
+  processEmphasisTilde(delims);
 
   // ---- render ----
   const out = [];
@@ -1458,11 +1461,157 @@ function stripExtendedAutolinks(node) {
   }
 }
 
-function processEmphasis(delims) {
+// Emphasis for '*' and '_' following marked's emStrong algorithm, which is
+// opener-first (not CommonMark's closer-first): the LEFTMOST opener scans
+// forward for its closer, counting a debt of delimiters. Inner opener-only
+// runs ADD to the debt, closer runs pay it down, and a both-ways run that
+// would make an odd match (rule of 3s) is skipped with its length banked.
+// The opener must be fully covered (debt <= 0) before it matches; if the
+// full run fails, the run is retried one delimiter shorter (the peeled
+// char becomes literal text: "**foo*" -> "*<em>foo</em>"). Leftover
+// delimiters from the matched runs go INSIDE the em/strong node, because
+// marked re-parses the inner text ("*a **b** c***" keeps its "**" inside
+// the em, where it closes the inner strong).
+function processEmphasisMarked(delims) {
+  let oi = 0;
+  while (oi < delims.length) {
+    const O = delims[oi];
+    if (O.ch === 126 || !O.open || O.len === 0) { oi++; continue; }
+    const parent = O.n.p;
+    const y = O.len; // rule of 3s counts the WHOLE run, even when retrying
+    // marked's RDelim regexes skip a lone '*' enclosed in a "__...__" span
+    // (and symmetrically a lone '_' in "**...**") at the START of the scan,
+    // so "*foo __bar *baz bim__ bam*" forms the outer em (CommonMark ex. 470).
+    // Fires only when the first three */_ siblings after the opener are
+    // exactly [other-char run of 2, lone same-char run, other-char run >= 2].
+    const otherCh = O.ch === 42 ? 95 : 42;
+    let skipRec = null;
+    {
+      let seen = 0, u1 = null, s = null;
+      for (let j = oi + 1; j < delims.length && seen < 3; j++) {
+        const D = delims[j];
+        if (D.n.p !== parent || D.ch === 126 || D.len === 0) continue;
+        seen++;
+        if (seen === 1) u1 = D;
+        else if (seen === 2) s = D;
+        else if (u1.ch === otherCh && u1.len === 2 && s.ch === O.ch && s.len === 1 && D.ch === otherCh && D.len >= 2) skipRec = s;
+      }
+    }
+    let matched = false;
+    for (let k = O.len; k >= 1 && !matched; k--) {
+      let m = k, f = 0;
+      const retry = k < O.len;
+      let closer = null, bPrime = 0;
+      for (let j = oi + 1; j < delims.length; j++) {
+        const D = delims[j];
+        if (D === skipRec) continue;
+        if (D.n.p !== parent || D.ch !== O.ch || D.len === 0 || (!D.open && !D.close)) continue;
+        if (D.open && !D.close) { m += D.len; continue; }
+        if ((D.open && D.close) || O.close) {
+          if (retry && D.open && D.close) break; // no match for this attempt
+          if (y % 3 !== 0 && (y + D.len) % 3 === 0) { f += D.len; continue; }
+        }
+        m -= D.len;
+        if (m > 0) continue;
+        bPrime = Math.min(D.len, D.len + m + f);
+        closer = D;
+        break;
+      }
+      if (!closer) continue;
+      const use = (Math.min(k, bPrime) % 2 === 1) ? 1 : 2;
+      wrapEmphasisMarked(delims, oi, O, closer, k, bPrime, use);
+      matched = true;
+    }
+    oi++;
+  }
+}
+
+// First/last inner character whitespace-ness, for leftover delimiter flags.
+// Only text nodes carry real characters; a hard break is whitespace; every
+// other inline node starts/ends with a non-space source char ('[', '`',
+// '<', '!', '&', a delimiter).
+function innerEdgeWs(moved, first) {
+  const step = first ? 1 : -1;
+  let k = first ? 0 : moved.length - 1;
+  while (k >= 0 && k < moved.length) {
+    const n = moved[k];
+    if (n.t === 0) {
+      if (n.s.length === 0) { k += step; continue; }
+      return isSpaceCode(first ? n.s.charCodeAt(0) : n.s.charCodeAt(n.s.length - 1));
+    }
+    if (n.t === 6) return true;
+    if (n.t === 10 && n.ch && n.ch.length > 0) return innerEdgeWs(n.ch, first);
+    return false;
+  }
+  return true;
+}
+
+function wrapEmphasisMarked(delims, oi, O, D, k, bPrime, use) {
+  const parent = O.n.p;
+  const kids = parent.ch;
+  const oiNode = kids.indexOf(O.n);
+  const ciNode = kids.indexOf(D.n);
+  const cj = delims.indexOf(D);
+  const moved = kids.splice(oiNode + 1, ciNode - oiNode - 1);
+  const emph = makeNode(9);
+  emph.tag = use === 1 ? 'em' : 'strong';
+  emph.ch = [];
+  emph.p = parent;
+  for (const m of moved) {
+    m.p = emph;
+    emph.ch.push(m);
+  }
+  // trailing leftover (bPrime - use delimiters) goes inside at the END:
+  // insert its record before the closer's (do this first: inserting the
+  // leading leftover afterwards shifts indices, but only after oi).
+  if (bPrime - use > 0) {
+    const tn = makeNode(1);
+    tn.ch = O.ch;
+    tn.len = bPrime - use;
+    tn.open = false;
+    tn.close = !innerEdgeWs(moved, false);
+    tn.s = String.fromCharCode(O.ch).repeat(bPrime - use);
+    tn.p = emph;
+    emph.ch.push(tn);
+    delims.splice(cj, 0, { n: tn, ch: O.ch, len: bPrime - use, open: false, close: tn.close });
+  }
+  // leading leftover (k - use delimiters) goes inside at the START.
+  if (k - use > 0) {
+    const ln = makeNode(1);
+    ln.ch = O.ch;
+    ln.len = k - use;
+    ln.open = !innerEdgeWs(moved, true);
+    ln.close = false;
+    ln.s = String.fromCharCode(O.ch).repeat(k - use);
+    ln.p = emph;
+    emph.ch.unshift(ln);
+    delims.splice(oi + 1, 0, { n: ln, ch: O.ch, len: k - use, open: ln.open, close: false });
+  }
+  kids.splice(oiNode + 1, 0, emph);
+  // the opener keeps only its peeled (O.len - k) chars as literal text;
+  // the closer keeps its unconsumed (D.len - bPrime) tail.
+  O.n.s = O.n.s.slice(0, O.len - k);
+  O.len = O.len - k;
+  D.n.s = D.n.s.slice(bPrime);
+  D.len = D.len - bPrime;
+  if (O.len === 0) {
+    const x = kids.indexOf(O.n);
+    if (x !== -1) kids.splice(x, 1);
+  }
+  if (D.len === 0) {
+    const x = kids.indexOf(D.n);
+    if (x !== -1) kids.splice(x, 1);
+  }
+  // the peeled opener remnant is literal text now: invisible to later scans
+  O.open = false;
+  O.close = false;
+}
+
+function processEmphasisTilde(delims) {
   let di = 0;
   while (di < delims.length) {
     const closer = delims[di];
-    if (!closer.close || closer.len === 0) { di++; continue; }
+    if (closer.ch !== 126 || !closer.close || closer.len === 0) { di++; continue; }
     const parent = closer.n.p;
     // find matching opener: nearest delimiter, same char, same parent, can open
     let opener = null;
@@ -2339,8 +2488,18 @@ function parseBlocks(lines, start, end, refs, lazy, spaceLines, inListItem) {
         }
         // marked quirk: the fence's indent is stripped from content lines
         // only for BACKTICK fences ("   ```ts\n   foo" -> "foo"); TILDE
-        // fences keep the indent ("   ~~~ts\n   foo" -> "   foo")
-        if (fence.ch === 96) content.push(stripIndentStr(l, fence.indent, true));
+        // fences keep the indent ("   ~~~ts\n   foo" -> "   foo"). The
+        // strip counts whitespace CHARACTERS, not columns: a tab is one
+        // char and is removed whole ("   ```\n\tfoo" -> "foo", not " foo").
+        if (fence.ch === 96) {
+          let k = 0, n = 0;
+          while (k < l.length && n < fence.indent) {
+            const c = l.charCodeAt(k);
+            if (c === 32 || c === 9) { k++; n++; }
+            else break;
+          }
+          content.push(l.slice(k));
+        }
         else content.push(l);
         j++;
       }
