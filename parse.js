@@ -441,18 +441,25 @@ function maskCodeSpans(s) {
   let j = 0;
   while (j < s.length) {
     const c = s.charCodeAt(j);
-    // A backslash + ASCII punctuation is an escape (marked masks it to
-    // '+'): the escaped character is not a backtick run.
-    if (c === 92 && j + 1 < s.length && ASCII_PUNCT[s.charCodeAt(j + 1)] === 1) { j += 2; continue; }
+    // A backslash + ASCII punctuation is an escape: the escaped character
+    // cannot open a span, but an escaped backtick can still close one
+    // (the mask regex finds the closing run by scanning forward, without
+    // escape awareness), so record it as an escaped run.
+    if (c === 92 && j + 1 < s.length && ASCII_PUNCT[s.charCodeAt(j + 1)] === 1) {
+      if (s.charCodeAt(j + 1) === 96) runs.push({ s: j + 1, e: j + 2, len: 1, esc: true });
+      j += 2;
+      continue;
+    }
     if (c === 96) {
       let k = j;
       while (k < s.length && s.charCodeAt(k) === 96) k++;
-      runs.push({ s: j, e: k, len: k - j });
+      runs.push({ s: j, e: k, len: k - j, esc: false });
       j = k;
     } else j++;
   }
   const spans = [];
   for (let a = 0; a < runs.length; a++) {
+    if (runs[a].esc) continue; // an escaped backtick cannot open a span
     for (let b = a + 1; b < runs.length; b++) {
       if (runs[b].len === runs[a].len) {
         spans.push({ s: runs[a].s, e: runs[b].e });
