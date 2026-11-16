@@ -311,6 +311,34 @@ function cleanAttr(s) {
 // Clean a raw link destination for the href/src attribute: entities are
 // processed (numeric decoded then percent-encoded, name-like left verbatim),
 // the rest is percent-encoded like encodeURI, and a bare & becomes &amp;.
+function isHexDigit(c) {
+  return (
+    (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+  );
+}
+
+// Like encodeURI, but an existing %XX sequence is left intact (marked does
+// not double-encode %20 in a destination).
+function encodeUrlPart(s) {
+  if (s.indexOf('%') < 0) return encodeURI(s);
+  let out = '';
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (
+      s.charCodeAt(i) === 37 &&
+      i + 2 < s.length &&
+      isHexDigit(s.charCodeAt(i + 1)) &&
+      isHexDigit(s.charCodeAt(i + 2))
+    ) {
+      out += encodeURI(s.slice(start, i)) + s.slice(i, i + 3);
+      i += 2;
+      start = i + 1;
+    }
+  }
+  out += encodeURI(s.slice(start));
+  return out;
+}
+
 function cleanUrl(s) {
   let out = '';
   let start = 0;
@@ -318,7 +346,7 @@ function cleanUrl(s) {
     const c = s.charCodeAt(i);
     if (c !== 38) continue;
     const ent = parseEntityAt(s, i);
-    out += encodeURI(s.slice(start, i));
+    out += encodeUrlPart(s.slice(start, i));
     if (ent) {
       if (s.charCodeAt(i + 1) === 35) {
         // numeric reference: decode, then percent-encode the character
@@ -338,7 +366,7 @@ function cleanUrl(s) {
     }
     start = i + 1;
   }
-  out += encodeURI(s.slice(start));
+  out += encodeUrlPart(s.slice(start));
   return out;
 }
 
@@ -1770,6 +1798,7 @@ function mkBlock(t, parent) {
     delim: '',
     bullet: '',
     tight: true,
+    looseByBlank: false,
     pad: 0,
     blankAfter: false,
     blankBetween: false,
@@ -1780,7 +1809,13 @@ function mkBlock(t, parent) {
   };
   if (parent) {
     parent.ch.push(b);
-    if (parent.t === 'item' && parent.blankBetween) {
+    // A child added to an item right after a blank line (and the item
+    // already had a child) means two children separated by a blank line.
+    if (
+      parent.t === 'item' &&
+      pbLastBlank === pbLineIdx - 1 &&
+      parent.ch.length > 1
+    ) {
       parent.hadChildAfterBlank = true;
     }
   }
@@ -2314,12 +2349,22 @@ function tryTable(text) {
   return { headCells: header, aligns, rows };
 }
 
+// Line tracking for the loose-list rule (parseBlocks is single-threaded
+// and synchronous, so module state is safe here): pbLineIdx is the line
+// currently processed, pbLastBlank the index of the most recent blank line.
+// A child added to an item right after a blank line means the item has two
+// children separated by a blank line (loose).
+let pbLineIdx = 0;
+let pbLastBlank = -1;
+let pbBlankWasItem = false;
+
 // ---------------------------------------------------------------------------
 // Block parser: the main line loop.
 // ---------------------------------------------------------------------------
 
 function parseBlocks(lines, endsWithNL, ctx) {
   const root = mkBlock('doc', null);
+  pbLastBlank = -1;
 
   function finalizePara(b) {
     let text = stripLinkDefs(b, ctx.refs);
@@ -2358,15 +2403,15 @@ function parseBlocks(lines, endsWithNL, ctx) {
         b.lines.pop();
       }
     } else if (b.t === 'list') {
-      let tight = true;
-      for (let i = 0; i < b.ch.length; i++) {
-        const item = b.ch[i];
-        if (
-          item.blankAfter &&
-          (i < b.ch.length - 1 || item.hadChildAfterBlank)
-        ) {
-          tight = false;
-          break;
+      // Loose if a blank line separated two items, or any item has two
+      // children separated by a blank line.
+      let tight = !b.looseByBlank;
+      if (tight) {
+        for (let i = 0; i < b.ch.length; i++) {
+          if (b.ch[i].hadChildAfterBlank) {
+            tight = false;
+            break;
+          }
         }
       }
       b.tight = tight;
@@ -2391,6 +2436,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
   }
 
   for (let li = 0; li < lines.length; li++) {
+    pbLineIdx = li;
     const line = lines[li];
     const terminated = li < lines.length - 1 || endsWithNL;
     let offset = 0;
@@ -2496,12 +2542,8 @@ function parseBlocks(lines, endsWithNL, ctx) {
       (offset >= line.length || !matchedContainer);
     if (isBlank) {
       finalizeUpTo(container);
-      for (let c = container; c; c = c.parent) {
-        if (c.t === 'item') {
-          c.blankAfter = true;
-          if (c.ch.length > 0) c.blankBetween = true;
-        }
-      }
+      pbLastBlank = li;
+      pbBlankWasItem = container.t === 'item';
       // A blank line closes an empty list item.
       if (container.t === 'item' && container.ch.length === 0) {
         finalizeBlock(container);
@@ -2630,6 +2672,11 @@ function parseBlocks(lines, endsWithNL, ctx) {
         if (reuse) {
           // Reuse the open list: close the previous item, not the list.
           finalizeUpTo(list);
+          // A new item right after a blank line (whose container was an
+          // item, not a quote) separates two items: the list is loose.
+          if (pbLastBlank === li - 1 && pbBlankWasItem) {
+            list.looseByBlank = true;
+          }
         } else {
           finalizeUpTo(container);
           list = mkBlock('list', container);
@@ -2660,7 +2707,9 @@ function parseBlocks(lines, endsWithNL, ctx) {
         spaces = q.spaces;
         continue;
       }
-      if (!paraBlocks) {
+      // Indented code cannot interrupt any open paragraph, lazy or not:
+      // an indented line after a lazy paragraph is a lazy continuation.
+      if (!openPara) {
         const ind = indentFrom(line, offset, col, spaces);
         if (ind.indent >= 4) {
           interrupt();
