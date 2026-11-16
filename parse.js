@@ -2034,13 +2034,10 @@ function blankFrom(line, offset) {
   return true;
 }
 
-// Blank for the HTML trailing-newline rule: only spaces count; a
-// tab-only line is non-blank (`-->\n\t\npara` keeps the \n).
+// Blank for the HTML trailing-newline rule: only a truly empty line
+// counts; any whitespace (spaces or tabs) keeps the \n.
 function blankSpacesOnly(line) {
-  for (let j = 0; j < line.length; j++) {
-    if (line.charCodeAt(j) !== 32) return false;
-  }
-  return true;
+  return line.length === 0;
 }
 
 function mkBlock(t, parent) {
