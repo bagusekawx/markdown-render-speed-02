@@ -883,9 +883,9 @@ function matchAngleAutolink(s, i) {
 
 // Scan src into a flat item list, resolving links/images with a bracket
 // stack. Emphasis is resolved afterwards by resolveEmphasis().
-function scanInline(src, refs) {
+function scanInline(src, refs, doc) {
   const items = [];
-  const brackets = []; // { idx, img, active, start }
+  const brackets = []; // { idx, img, active, start, inLink }
   let textBuf = '';
   const flushText = () => {
     if (textBuf !== '') {
@@ -1120,7 +1120,7 @@ function scanInline(src, refs) {
     if (c === 91) {
       flushText();
       items.push('[');
-      brackets.push({ idx: items.length - 1, img: false, active: true, start: i + 1 });
+      brackets.push({ idx: items.length - 1, img: false, active: true, start: i + 1, inLink: doc.inLink });
       i++;
       continue;
     }
@@ -1128,7 +1128,7 @@ function scanInline(src, refs) {
       flushText();
       items.push('!');
       items.push('[');
-      brackets.push({ idx: items.length - 1, img: true, active: true, start: i + 2 });
+      brackets.push({ idx: items.length - 1, img: true, active: true, start: i + 2, inLink: doc.inLink });
       i += 2;
       continue;
     }
@@ -1233,6 +1233,10 @@ function scanInline(src, refs) {
         for (const b of brackets) if (!b.img) b.active = false;
       }
       brackets.length = bi;
+      // A link's label is tokenized with inLink set and then restored, so
+      // any <a> or </a> inside the label leaves no trace on the
+      // document-level state.
+      doc.inLink = br.inLink;
       i = link.next;
       continue;
     }
@@ -1258,7 +1262,14 @@ function scanInline(src, refs) {
       const tag = matchHtmlTag(src, i);
       if (tag !== -1) {
         flushText();
-        items.push({ h: src.slice(i, tag) });
+        const t = src.slice(i, tag);
+        // marked's tag tokenizer keeps a document-level inLink: an <a ...>
+        // start tag (a space must follow <a) sets it, a </a> end tag clears
+        // it. It is never reset between paragraphs, so an unclosed <a>
+        // suppresses every later GFM autolink in the document.
+        if (!doc.inLink && t.length > 2 && (t.charCodeAt(1) === 97 || t.charCodeAt(1) === 65) && t.charCodeAt(2) === 32) doc.inLink = true;
+        else if (doc.inLink && t.length > 3 && t.charCodeAt(1) === 47 && (t.charCodeAt(2) === 97 || t.charCodeAt(2) === 65) && t.charCodeAt(3) === 62) doc.inLink = false;
+        items.push({ h: t });
         i = tag;
         continue;
       }
@@ -1308,7 +1319,9 @@ function scanInline(src, refs) {
     }
 
     // GFM autolinks: www. / http(s):// / ftp:// / mailto: / xmpp:
-    if (c === 119 || c === 104 || c === 72 || c === 102 || c === 70 || c === 109 || c === 120) {
+    // Suppressed while the document-level inLink is set (an unclosed
+    // <a> tag); the characters then fall through to plain text.
+    if (!doc.inLink && (c === 119 || c === 104 || c === 72 || c === 102 || c === 70 || c === 109 || c === 120)) {
       const prev = i === 0 ? -1 : src.charCodeAt(i - 1);
       // Inside an open link bracket, a GFM URL must not swallow the ]
       // that closes the link (marked matches the link first).
@@ -1325,8 +1338,8 @@ function scanInline(src, refs) {
       }
     }
 
-    // GFM email autolink, tried at word starts.
-    if (isEmailLocal(c) && (i === 0 || !isEmailLocal(src.charCodeAt(i - 1)))) {
+    // GFM email autolink, tried at word starts (suppressed while inLink).
+    if (!doc.inLink && isEmailLocal(c) && (i === 0 || !isEmailLocal(src.charCodeAt(i - 1)))) {
       const m = matchEmail(src, i);
       if (m) {
         flushText();
@@ -1543,8 +1556,8 @@ function resolveEmphasis(items) {
 }
 
 // Full inline parse: scan, then resolve emphasis.
-function parseInline(src, refs) {
-  const items = scanInline(src, refs);
+function parseInline(src, refs, doc) {
+  const items = scanInline(src, refs, doc);
   resolveEmphasis(items);
   return items;
 }
@@ -3400,21 +3413,21 @@ function codeText(lines) {
   return text + '\n';
 }
 
-function renderBlocks(children, refs, out) {
-  for (const node of children) renderBlock(node, refs, out);
+function renderBlocks(children, refs, out, doc) {
+  for (const node of children) renderBlock(node, refs, out, doc);
 }
 
-function renderBlock(node, refs, out) {
+function renderBlock(node, refs, out, doc) {
   switch (node.t) {
     case 'p': {
       out.push('<p>');
-      renderInline(parseInline(node.text, refs), out, false);
+      renderInline(parseInline(node.text, refs, doc), out, false);
       out.push('</p>\n');
       break;
     }
     case 'h': {
       out.push('<h', String(node.level), '>');
-      renderInline(parseInline(node.text, refs), out, false);
+      renderInline(parseInline(node.text, refs, doc), out, false);
       out.push('</h', String(node.level), '>\n');
       break;
     }
@@ -3464,7 +3477,7 @@ function renderBlock(node, refs, out) {
         out.push('<th');
         if (a !== null) out.push(' align="', a, '"');
         out.push('>');
-        renderInline(parseInline(node.header[ci], refs), out, false);
+        renderInline(parseInline(node.header[ci], refs, doc), out, false);
         out.push('</th>\n');
       }
       out.push('</tr>\n</thead>\n');
@@ -3477,7 +3490,7 @@ function renderBlock(node, refs, out) {
             out.push('<td');
             if (a !== null) out.push(' align="', a, '"');
             out.push('>');
-            renderInline(parseInline(row[ci], refs), out, false);
+            renderInline(parseInline(row[ci], refs, doc), out, false);
             out.push('</td>\n');
           }
           out.push('</tr>\n');
@@ -3489,7 +3502,7 @@ function renderBlock(node, refs, out) {
     }
     case 'q': {
       out.push('<blockquote>\n');
-      renderBlocks(node.children, refs, out);
+      renderBlocks(node.children, refs, out, doc);
       out.push('</blockquote>\n');
       break;
     }
@@ -3498,7 +3511,7 @@ function renderBlock(node, refs, out) {
       out.push('<', tag);
       if (node.ordered && node.start !== 1) out.push(' start="', String(node.start), '"');
       out.push('>\n');
-      for (const item of node.children) renderListItem(item, node.loose, refs, out);
+      for (const item of node.children) renderListItem(item, node.loose, refs, out, doc);
       out.push('</', tag, '>\n');
       break;
     }
@@ -3508,7 +3521,7 @@ function renderBlock(node, refs, out) {
 // Render one list item. In a loose list, paragraph children are wrapped in
 // <p>; in a tight list they render bare. A task marker on the first
 // paragraph becomes a checkbox (with a trailing space, as marked renders it).
-function renderListItem(item, loose, refs, out) {
+function renderListItem(item, loose, refs, out, doc) {
   out.push('<li>');
   if (item.children.length === 0) {
     out.push('</li>\n');
@@ -3540,14 +3553,14 @@ function renderListItem(item, loose, refs, out) {
       if (loose) {
         out.push('<p>');
         if (ci === 0 && checkbox !== null) out.push(checkbox);
-        renderInline(parseInline(child.text, refs), out, false);
+        renderInline(parseInline(child.text, refs, doc), out, false);
         out.push('</p>\n');
       } else {
         if (ci === 0 && checkbox !== null) out.push(checkbox);
-        renderInline(parseInline(child.text, refs), out, false);
+        renderInline(parseInline(child.text, refs, doc), out, false);
       }
     } else {
-      renderBlock(child, refs, out);
+      renderBlock(child, refs, out, doc);
     }
   }
   out.push('</li>\n');
@@ -3566,6 +3579,11 @@ export function parse(markdown) {
   if (srcEndsNL) lines.pop();
   const { root, refs } = parseBlocks(lines, srcEndsNL);
   const out = [];
-  renderBlocks(root.children, refs, out);
+  // Document-level inline state, shared by every paragraph, heading and
+  // table cell: marked's lexer keeps inLink across inline blocks (only
+  // inRawBlock is reset per block), so an unclosed <a> tag suppresses
+  // GFM autolinks for the rest of the document.
+  const doc = { inLink: false };
+  renderBlocks(root.children, refs, out, doc);
   return out.join('');
 }
