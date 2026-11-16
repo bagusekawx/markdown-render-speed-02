@@ -1279,9 +1279,17 @@ function parseInline(src, ctx) {
       const runLen = j - i;
       let close = -1;
       let k = j;
-      while (k < n) {
+      // Inside an open [ bracket, a code span's closer must be on
+      // the same line as the opener (it may cross the ] itself, but
+      // must not swallow the link and run on to a later line).
+      let searchEnd = n;
+      if (brackets.some(b => b.active)) {
+        const nl = src.indexOf('\n', j);
+        if (nl >= 0) searchEnd = nl;
+      }
+      while (k < searchEnd) {
         const b = src.indexOf('`', k);
-        if (b < 0) break;
+        if (b < 0 || b >= searchEnd) break;
         let e = b;
         while (e < n && src.charCodeAt(e) === 96) e++;
         if (e - b === runLen) {
