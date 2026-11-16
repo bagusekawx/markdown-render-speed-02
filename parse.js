@@ -2279,8 +2279,8 @@ function parseBlocks(lines, srcEndsNL) {
       // regardless of its indent).
       let absorbed = false;
       let insideLeaf = true;
+      let deepestQuote = -1;
       if (openLeaf !== null) {
-        let deepestQuote = -1;
         for (let fi = 1; fi < openLeaf.depth; fi++) {
           if (stack[fi].t === 'q') deepestQuote = fi;
         }
@@ -2300,7 +2300,11 @@ function parseBlocks(lines, srcEndsNL) {
           }
         } else if (node.t === 'html') {
           if (node.ended) {
-            node.trailNL = false;
+            // The block keeps its trailing \n when the blank line is
+            // inside a quote (the quote's inner text joins a \n onto it)
+            // or when the blank line itself holds whitespace (a truly
+            // empty line swallows the \n via the (\n+) in the html match).
+            node.trailNL = insideLeaf && (deepestQuote >= 0 || curRest(cur) !== '');
             closeLeaf();
           } else if (node.type === 6 || node.type === 7) {
             node.trailNL = false;
