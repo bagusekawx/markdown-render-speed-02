@@ -3382,6 +3382,28 @@ function parseBlocks(lines, endsWithNL, ctx) {
         }
         if (inQuote) content = '    ' + content.trim();
       }
+    } else if (openPara && openParaLazy && matchedQuote) {
+      // A lazy continuation inside a quote whose item failed to
+      // match by exactly one space: when the remaining indent is
+      // >= 4, marked strips the item pad (minus the quote space);
+      // below 4 it keeps the spaces as paragraph content.
+      let itemPad = 0;
+      let itemOrdered = false;
+      let anc = openPara.parent;
+      while (anc) {
+        if (anc.t === 'item') {
+          itemPad = anc.pad;
+          itemOrdered = anc.parent && anc.parent.ordered;
+          break;
+        }
+        anc = anc.parent;
+      }
+      const ind = indentFrom(line, offset, col, spaces);
+      if (itemOrdered && itemPad > 0 && ind.indent === itemPad - 1 && ind.indent >= 4) {
+        content = contentAfter(line, offset, col, spaces, itemPad - 1, true, tabBase);
+      } else {
+        content = contentAfter(line, offset, col, spaces, 0, true, tabBase);
+      }
     } else {
       content = contentAfter(line, offset, col, spaces, 0, true, tabBase);
     }
