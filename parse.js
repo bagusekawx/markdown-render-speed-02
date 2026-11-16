@@ -17,7 +17,7 @@ function isAsciiPunct(code) {
   );
 }
 
-const RE_UNICODE_PUNCT = /\p{P}/u;
+const RE_UNICODE_PUNCT = /[\p{P}\p{S}]/u;
 function isPunctCh(ch) {
   const c = ch.charCodeAt(0);
   if (c < 128) return isAsciiPunct(c);
@@ -160,7 +160,10 @@ function normalizeLabel(raw) {
         out += ' ';
         pendingSpace = false;
       }
-      out += ch;
+      // Full Unicode case folding: ß and ẞ fold to "ss"
+      // (toLowerCase alone gives ß, which would not match SS).
+      if (ch === 'ß' || ch === 'ẞ') out += 'ss';
+      else out += ch;
       started = true;
     }
   }
@@ -237,7 +240,7 @@ function parseDest(s, i) {
     out += s[j];
     j++;
   }
-  if (j === i || depth !== 0) return null;
+  if (depth !== 0) return null;
   return { dest: out, end: j };
 }
 
@@ -426,6 +429,19 @@ function parseHtmlTag(src, i) {
     } else break;
   }
   const tagName = src.slice(closing ? i + 2 : i + 1, j).toLowerCase();
+  if (closing) {
+    // A closing tag may only have whitespace before '>' (no attributes).
+    let k = j;
+    while (k < n) {
+      const c = src.charCodeAt(k);
+      if (c === 32 || c === 9 || c === 10) k++;
+      else break;
+    }
+    if (k < n && src.charCodeAt(k) === 62) {
+      return { tag: tagName, closing: true, selfClose: false, end: k + 1 };
+    }
+    return null;
+  }
   for (;;) {
     let k = j;
     while (k < n) {
@@ -510,7 +526,9 @@ function parseHtmlTag(src, i) {
         j = m;
       }
     } else {
-      j = k;
+      // Valueless attribute: leave j at the end of the name so the next
+      // loop iteration skips the whitespace itself (j = k here would make
+      // the k === j check reject the following attribute).
     }
   }
 }
@@ -655,7 +673,23 @@ function scanDomain(src, i) {
       } else break;
     }
     const len = j - start;
-    if (len === 0 || len > 63) return -1;
+    if (len === 0) {
+      // Empty label after a dot (trailing '.'): the domain ends at the
+      // previous label, if that label is a valid TLD.
+      if (labels >= 2 && lastLabelLen >= 2) {
+        let ok = true;
+        for (let k = lastLabelStart; k < lastLabelStart + lastLabelLen; k++) {
+          const c = src.charCodeAt(k);
+          if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) return lastLabelStart + lastLabelLen;
+      }
+      return -1;
+    }
+    if (len > 63) return -1;
     if (src.charCodeAt(start) === 45 || src.charCodeAt(j - 1) === 45) return -1;
     labels++;
     lastLabelStart = start;
@@ -674,6 +708,102 @@ function scanDomain(src, i) {
   }
   return j;
 }
+
+// Scan an email domain after '@': labels of alphanumerics/hyphens separated
+// by dots, at least one dot. Unlike www domains, the last label may be a
+// single letter (a.b is a valid email domain). A trailing dot ends the
+// domain before the dot.
+function scanEmailDomain(src, i) {
+  const n = src.length;
+  let j = i;
+  let labels = 0;
+  let lastEnd = -1;
+  for (;;) {
+    const start = j;
+    while (j < n) {
+      const c = src.charCodeAt(j);
+      if (
+        (c >= 48 && c <= 57) ||
+        (c >= 65 && c <= 90) ||
+        (c >= 97 && c <= 122) ||
+        c === 45
+      ) {
+        j++;
+      } else break;
+    }
+    const len = j - start;
+    if (len === 0 || len > 63) {
+      if (len === 0 && labels >= 2) return lastEnd;
+      return -1;
+    }
+    if (src.charCodeAt(start) === 45 || src.charCodeAt(j - 1) === 45) return -1;
+    labels++;
+    lastEnd = j;
+    if (j < n && src.charCodeAt(j) === 46) {
+      j++;
+      continue;
+    }
+    break;
+  }
+  if (labels < 2) return -1;
+  return j;
+}
+
+// Scan the content after a "scheme:" (no //): an email address or a domain,
+// optionally followed by one /path-segment. Returns the end index or -1.
+function scanSchemeContent(src, i) {
+  const n = src.length;
+  let end = -1;
+  // Try an email address first: local@domain.
+  let j = i;
+  while (j < n && isEmailLocalChar(src.charCodeAt(j))) j++;
+  if (j > i && j < n && src.charCodeAt(j) === 64) {
+    const domEnd = scanEmailDomain(src, j + 1);
+    if (domEnd > 0) end = domEnd;
+  }
+  if (end < 0) {
+    const domEnd = scanDomain(src, i);
+    if (domEnd > 0) end = domEnd;
+  }
+  if (end < 0) return -1;
+  // At most one /path-segment after the email/domain.
+  if (end < n && src.charCodeAt(end) === 47) {
+    let k = end + 1;
+    while (k < n) {
+      const c = src.charCodeAt(k);
+      if (
+        c === 32 ||
+        c === 9 ||
+        c === 10 ||
+        c === 60 ||
+        c === 62 ||
+        c === 47
+      ) {
+        break;
+      }
+      k++;
+    }
+    if (k > end + 1) end = k;
+  }
+  return end;
+}
+
+// Valid HTML entity names (for the GFM autolink ';' rule: a trailing
+// &name; is kept only when name is a valid entity, otherwise the whole
+// &name; is dropped from the URL).
+const VALID_ENTITIES = new Set([
+  'amp', 'lt', 'gt', 'quot', 'apos', 'nbsp', 'copy', 'reg', 'trade',
+  'hellip', 'mdash', 'ndash', 'ouml', 'AElig', 'aelig', 'Dcaron',
+  'frac34', 'frac12', 'frac14', 'HilbertSpace', 'DifferentialD',
+  'ClockwiseContourIntegral', 'ngE', 'lsquo', 'rsquo', 'ldquo', 'rdquo',
+  'laquo', 'raquo', 'euro', 'pound', 'yen', 'cent', 'deg', 'plusmn',
+  'times', 'divide', 'eacute', 'Eacute', 'agrave', 'egrave', 'igrave',
+  'ograve', 'ugrave', 'aacute', 'iacute', 'oacute', 'uacute', 'acirc',
+  'ecirc', 'icirc', 'ocirc', 'ucirc', 'atilde', 'ntilde', 'otilde',
+  'aring', 'ccedil', 'yuml', 'szlig', 'yacute', 'thorn', 'eth',
+  'micro', 'para', 'middot', 'cedil', 'ordf', 'ordm', 'iexcl',
+  'iquest', 'curren', 'brvbar', 'sect', 'uml', 'sup1', 'sup2', 'sup3',
+]);
 
 // Trim trailing punctuation from a GFM autolink URL (src[start..end)):
 // trailing ? ! . , : * _ ~ ' are dropped; a trailing ) is dropped while
@@ -698,7 +828,8 @@ function trimGfmUrl(src, start, end) {
       continue;
     }
     if (c === 59) {
-      // ';' — keep it when it ends an &name; entity inside the URL.
+      // ';' — keep it when it ends a valid &name; entity; otherwise drop
+      // the whole &name; (the autolink ends before the &).
       let k = e - 2;
       while (k >= start) {
         const cc = src.charCodeAt(k);
@@ -712,7 +843,11 @@ function trimGfmUrl(src, start, end) {
         }
         break;
       }
-      if (k >= start && src.charCodeAt(k) === 38 && k < e - 2) return e;
+      if (k >= start && src.charCodeAt(k) === 38 && k < e - 2) {
+        if (VALID_ENTITIES.has(src.slice(k + 1, e - 1))) return e;
+        e = k;
+        continue;
+      }
       e--;
       continue;
     }
@@ -759,7 +894,8 @@ function gfmBoundaryOk(src, i) {
     c === 42 ||
     c === 95 ||
     c === 126 ||
-    c === 40
+    c === 40 ||
+    c === 60
   );
 }
 
@@ -967,6 +1103,19 @@ function renderInline(node, out) {
 // Parse inline content into a node list; returns the list {ch, cl}.
 // ctx: { refs: Map<label, {dest, title}>, inLink: bool } — inLink persists
 // across the whole document (an unclosed raw <a> suppresses GFM autolinks).
+// Whether the sibling chain starting at node (or any of its descendants)
+// contains a link node (type 8). A link whose text already contains a link
+// does not form.
+function containsLink(node) {
+  let cur = node;
+  while (cur) {
+    if (cur.t === 8) return true;
+    if (cur.ch && containsLink(cur.ch)) return true;
+    cur = cur.n;
+  }
+  return false;
+}
+
 function parseInline(src, ctx) {
   const list = { ch: null, cl: null };
   const delimiters = [];
@@ -979,6 +1128,7 @@ function parseInline(src, ctx) {
     if (end > textStart) {
       const node = mkNode(0);
       node.s = escapeHtml(src.slice(textStart, end));
+      node.pos = textStart;
       appendNode(list, node);
     }
     textStart = end;
@@ -1034,6 +1184,13 @@ function parseInline(src, ctx) {
       let j = i;
       while (j < n && src.charCodeAt(j) === c) j++;
       const runLen = j - i;
+      if (c === 126 && runLen >= 3) {
+        // Runs of 3+ tildes never form strikethrough (GFM): they stay
+        // literal text. (flushText already ran; the run is re-included
+        // in the text at the next flush.)
+        i = j;
+        continue;
+      }
       const before = i > 0 ? src[i - 1] : '';
       const after = j < n ? src[j] : '';
       const beforeSpace = before === '' || isSpaceCh(before);
@@ -1047,6 +1204,7 @@ function parseInline(src, ctx) {
       const d = mkNode(10);
       d.c = String.fromCharCode(c);
       d.len = runLen;
+      d.pos = i;
       if (c === 95) {
         d.canOpen = leftFlank && (!rightFlank || beforePunct);
         d.canClose = rightFlank && (!leftFlank || afterPunct);
@@ -1107,8 +1265,16 @@ function parseInline(src, ctx) {
       let dest = null;
       let title = null;
       const after = i + 1;
-      if (after < n && src.charCodeAt(after) === 40) {
-        // Inline link ( ... ) — no fallback when it fails to parse.
+      const nextCh = after < n ? src.charCodeAt(after) : -1;
+      const shortcutRef = () => {
+        const rawLabel = src.slice(br.pos + 1, i);
+        const label = normalizeLabel(rawLabel);
+        if (label === '') return null;
+        return ctx.refs.get(label) || null;
+      };
+      if (nextCh === 40) {
+        // Inline link ( ... ). If it fails to parse, fall back to a
+        // shortcut reference.
         const k = skipWs(src, after + 1);
         const d = parseDest(src, k);
         if (d) {
@@ -1128,35 +1294,55 @@ function parseInline(src, ctx) {
             }
           }
         }
-      } else {
-        if (after < n && src.charCodeAt(after) === 91) {
-          const lbl = parseRefLabel(src, after);
-          if (lbl) {
-            const rawLabel =
-              lbl.raw === '' ? src.slice(br.pos + 1, i) : lbl.raw;
-            const ref = ctx.refs.get(
-              normalizeLabel(unescapeLabel(rawLabel)),
-            );
-            if (ref) {
-              linkEnd = lbl.end;
-              dest = ref.dest;
-              title = ref.title;
-            }
-          }
-        }
         if (linkEnd < 0) {
-          const rawLabel = src.slice(br.pos + 1, i);
-          const ref = ctx.refs.get(
-            normalizeLabel(unescapeLabel(rawLabel)),
-          );
+          const ref = shortcutRef();
           if (ref) {
             linkEnd = i + 1;
             dest = ref.dest;
             title = ref.title;
           }
         }
+      } else if (nextCh === 91) {
+        // Full or collapsed reference [label] or []. If a complete
+        // [...] follows but matches nothing, there is NO shortcut
+        // fallback; if there is no complete [...], fall back.
+        const lbl = parseRefLabel(src, after);
+        if (lbl) {
+          const rawLabel =
+            lbl.raw === '' ? src.slice(br.pos + 1, i) : lbl.raw;
+          const label = normalizeLabel(rawLabel);
+          if (label !== '') {
+            const ref = ctx.refs.get(label);
+            if (ref) {
+              linkEnd = lbl.end;
+              dest = ref.dest;
+              title = ref.title;
+            }
+          }
+        } else {
+          const ref = shortcutRef();
+          if (ref) {
+            linkEnd = i + 1;
+            dest = ref.dest;
+            title = ref.title;
+          }
+        }
+      } else {
+        const ref = shortcutRef();
+        if (ref) {
+          linkEnd = i + 1;
+          dest = ref.dest;
+          title = ref.title;
+        }
       }
       if (linkEnd < 0) {
+        br.active = false;
+        i++;
+        continue;
+      }
+      // A link whose text already contains a link does not form (images
+      // may contain links in their alt text).
+      if (!br.isImage && containsLink(br.node.n)) {
         br.active = false;
         i++;
         continue;
@@ -1191,7 +1377,17 @@ function parseInline(src, ctx) {
       // < — HTML comment / declaration / CDATA / PI / tag / autolink.
       let handled = false;
       if (i + 1 < n && src.charCodeAt(i + 1) === 33) {
-        if (src.startsWith('<!--', i)) {
+        if (src.startsWith('<!-->', i) || src.startsWith('<!--->', i)) {
+          // Abruptly closed comment: complete at the '>'.
+          const end = src.startsWith('<!--->', i) ? i + 6 : i + 5;
+          flushText(i);
+          const node = mkNode(2);
+          node.s = src.slice(i, end);
+          appendNode(list, node);
+          i = end;
+          textStart = i;
+          handled = true;
+        } else if (src.startsWith('<!--', i)) {
           const end = src.indexOf('-->', i + 4);
           if (end >= 0) {
             flushText(i);
@@ -1297,6 +1493,8 @@ function parseInline(src, ctx) {
         flushText(i);
         appendNode(list, mkNode(3));
         i += 2;
+        // A hard break strips leading spaces/tabs on the next line.
+        while (i < n && (src.charCodeAt(i) === 32 || src.charCodeAt(i) === 9)) i++;
         textStart = i;
         continue;
       }
@@ -1321,16 +1519,27 @@ function parseInline(src, ctx) {
         sp++;
         k--;
       }
-      let t = i - 1;
-      while (t >= textStart) {
-        const cc = src.charCodeAt(t);
-        if (cc === 32 || cc === 9) t--;
-        else break;
+      if (sp >= 2) {
+        // Hard break: strip all trailing spaces/tabs, and the leading
+        // spaces/tabs of the next line.
+        let t = i - 1;
+        while (t >= textStart) {
+          const cc = src.charCodeAt(t);
+          if (cc === 32 || cc === 9) t--;
+          else break;
+        }
+        flushText(t + 1);
+        appendNode(list, mkNode(3));
+        i++;
+        while (i < n && (src.charCodeAt(i) === 32 || src.charCodeAt(i) === 9)) i++;
+        textStart = i;
+      } else {
+        // Soft break: a single trailing space is kept (cm-649).
+        flushText(i);
+        appendNode(list, mkNode(4));
+        i++;
+        textStart = i;
       }
-      flushText(t + 1);
-      appendNode(list, mkNode(sp >= 2 ? 3 : 4));
-      i++;
-      textStart = i;
       continue;
     }
 
@@ -1373,20 +1582,38 @@ function parseInline(src, ctx) {
       }
       s0++;
       const schemeLen = i - s0;
-      if (
+      const schemeOk =
         schemeLen >= 2 &&
         schemeLen <= 32 &&
         s0 < i &&
         ((src.charCodeAt(s0) >= 65 && src.charCodeAt(s0) <= 90) ||
           (src.charCodeAt(s0) >= 97 && src.charCodeAt(s0) <= 122)) &&
+        gfmBoundaryOk(src, s0);
+      if (
+        schemeOk &&
         i + 2 < n &&
         src.charCodeAt(i + 1) === 47 &&
-        src.charCodeAt(i + 2) === 47 &&
-        gfmBoundaryOk(src, s0)
+        src.charCodeAt(i + 2) === 47
       ) {
         const domEnd = scanDomain(src, i + 3);
         if (domEnd > 0) {
           const end = scanGfmPath(src, domEnd);
+          const text = src.slice(s0, end);
+          flushText(s0);
+          const node = mkNode(11);
+          node.href = cleanUrl(text);
+          node.s = cleanAttr(text);
+          appendNode(list, node);
+          i = end;
+          textStart = i;
+          continue;
+        }
+      } else if (schemeOk) {
+        // scheme:email or scheme:domain (no //), e.g. mailto:foo@bar.baz.
+        const end0 = scanSchemeContent(src, i + 1);
+        // A '_' right after the content invalidates it (as for emails).
+        if (end0 > 0 && !(end0 < n && src.charCodeAt(end0) === 95)) {
+          const end = trimGfmUrl(src, s0, end0);
           const text = src.slice(s0, end);
           flushText(s0);
           const node = mkNode(11);
@@ -1408,8 +1635,22 @@ function parseInline(src, ctx) {
       while (s0 >= 0 && isEmailLocalChar(src.charCodeAt(s0))) s0--;
       s0++;
       if (s0 < i && gfmBoundaryOk(src, s0)) {
-        const domEnd = scanDomain(src, i + 1);
-        if (domEnd > 0) {
+        const domEnd = scanEmailDomain(src, i + 1);
+        // A '_' (or other word char) right after the domain invalidates
+        // the email (it would be part of a longer word).
+        if (domEnd > 0 && !(domEnd < n && src.charCodeAt(domEnd) === 95)) {
+          // Remove nodes already created inside the local part (e.g. a
+          // '_' delimiter run): the email replaces all of [s0, domEnd).
+          let tail = list.cl;
+          while (tail && tail.pos !== undefined && tail.pos >= s0) {
+            const prev = tail.p;
+            if (tail.t === 10) {
+              tail.canOpen = false;
+              tail.canClose = false;
+            }
+            unlinkNode(tail);
+            tail = prev;
+          }
           const text = src.slice(s0, domEnd);
           flushText(s0);
           const node = mkNode(11);
@@ -1831,7 +2072,21 @@ function matchHtmlBlock(line, offset, col, spaces) {
   }
   const m6 = RE_HTML_TYPE6.exec(rest);
   if (m6 && BLOCK_TAGS.has(m6[1].toLowerCase())) {
-    return { type: 6, endTag: null, first: j };
+    if (rest.charCodeAt(1) === 47) {
+      // Closing tag: only whitespace then '>' may follow the name.
+      let k = 2 + m6[1].length;
+      while (k < rest.length) {
+        const c = rest.charCodeAt(k);
+        if (c !== 32 && c !== 9) break;
+        k++;
+      }
+      if (k < rest.length && rest.charCodeAt(k) === 62) {
+        return { type: 6, endTag: null, first: j };
+      }
+      // A closing tag with attributes is not a tag at all.
+    } else {
+      return { type: 6, endTag: null, first: j };
+    }
   }
   const tag = parseHtmlTag(line, j);
   if (tag) {
@@ -1896,12 +2151,18 @@ function parseOneDef(text, pos) {
     j++;
   }
   if (labelEnd < 0) return null;
+  // Labels match on their raw form (escapes are NOT resolved for
+  // matching: [foo\!] does not match a [foo!] definition).
   const rawLabel = text.slice(p + 1, labelEnd);
-  if (rawLabel.length === 0 || rawLabel.length > 999) return null;
+  const label = normalizeLabel(rawLabel);
+  if (label === '' || rawLabel.length > 999) return null;
   if (labelEnd + 1 >= n || text.charCodeAt(labelEnd + 1) !== 58) return null;
   const k = skipWs(text, labelEnd + 2);
   const d = parseDest(text, k);
   if (!d) return null;
+  // A definition's destination may not be empty — except the <> form,
+  // which is a valid empty destination.
+  if (d.dest === '' && text.charCodeAt(k) !== 60) return null;
   let title = null;
   let k2 = skipWs(text, d.end);
   // A title must be separated from the destination by whitespace.
@@ -1922,7 +2183,7 @@ function parseOneDef(text, pos) {
   }
   if (k2 < n && text.charCodeAt(k2) !== 10) return null;
   return {
-    label: normalizeLabel(unescapeLabel(rawLabel)),
+    label,
     dest: d.dest,
     title,
     end: k2 < n ? k2 + 1 : k2,
@@ -1983,7 +2244,11 @@ function splitTableRow(line) {
   for (; i < n; i++) {
     const c = line.charCodeAt(i);
     if (c === 92 && i + 1 < n) {
-      cur += line[i] + line[i + 1];
+      // An escaped pipe is consumed by the split (the cell keeps a plain
+      // |, so it renders inside code spans too); other escapes are left
+      // for the inline parser.
+      if (line.charCodeAt(i + 1) === 124) cur += '|';
+      else cur += line[i] + line[i + 1];
       i++;
       continue;
     }
@@ -2447,6 +2712,20 @@ function renderInlineText(text, ctx, out) {
   renderInline(list.ch, out);
 }
 
+// GFM task list: a paragraph starting with "[ ] " or "[x] "/"[X] ".
+// Returns { checked, rest } where rest keeps the space after the bracket,
+// or null.
+function matchTask(text) {
+  if (text.length < 4) return null;
+  if (text.charCodeAt(0) !== 91) return null;
+  if (text.charCodeAt(2) !== 93) return null;
+  if (text.charCodeAt(3) !== 32) return null;
+  const c1 = text.charCodeAt(1);
+  if (c1 === 32) return { checked: false, rest: text.slice(3) };
+  if (c1 === 120 || c1 === 88) return { checked: true, rest: text.slice(3) };
+  return null;
+}
+
 function renderBlock(b, ctx, out, inTightList) {
   switch (b.t) {
     case 'doc':
@@ -2519,7 +2798,30 @@ function renderBlock(b, ctx, out, inTightList) {
     case 'item': {
       const tight = b.parent.tight;
       out.push('<li>');
-      for (const c of b.ch) renderBlock(c, ctx, out, tight);
+      let first = true;
+      for (const c of b.ch) {
+        if (first && c.t === 'para' && c.text !== null) {
+          const task = matchTask(c.text);
+          if (task) {
+            const box = task.checked
+              ? '<input checked="" disabled="" type="checkbox">'
+              : '<input disabled="" type="checkbox">';
+            if (tight) {
+              out.push(box);
+              renderInlineText(task.rest, ctx, out);
+            } else {
+              out.push('<p>');
+              out.push(box);
+              renderInlineText(task.rest, ctx, out);
+              out.push('</p>\n');
+            }
+            first = false;
+            continue;
+          }
+        }
+        renderBlock(c, ctx, out, tight);
+        first = false;
+      }
       out.push('</li>\n');
       break;
     }
@@ -2532,19 +2834,23 @@ function renderBlock(b, ctx, out, inTightList) {
         renderInlineText(b.headCells[i], ctx, out);
         out.push('</th>\n');
       }
-      out.push('</tr>\n</thead>\n<tbody>');
-      for (const row of b.rows) {
-        out.push('<tr>\n');
-        for (let i = 0; i < row.length; i++) {
-          out.push('<td');
-          if (b.aligns[i]) out.push(' align="', b.aligns[i], '"');
-          out.push('>');
-          renderInlineText(row[i], ctx, out);
-          out.push('</td>\n');
+      out.push('</tr>\n</thead>\n');
+      if (b.rows.length > 0) {
+        out.push('<tbody>');
+        for (const row of b.rows) {
+          out.push('<tr>\n');
+          for (let i = 0; i < row.length; i++) {
+            out.push('<td');
+            if (b.aligns[i]) out.push(' align="', b.aligns[i], '"');
+            out.push('>');
+            renderInlineText(row[i], ctx, out);
+            out.push('</td>\n');
+          }
+          out.push('</tr>\n');
         }
-        out.push('</tr>\n');
+        out.push('</tbody>');
       }
-      out.push('</tbody></table>\n');
+      out.push('</table>\n');
       break;
     }
     default:
