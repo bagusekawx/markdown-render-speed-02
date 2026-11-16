@@ -1081,17 +1081,17 @@ function processEmphasis(delimiters) {
           }
           // A closer with leftover delims moves inside the em/strong
           // it just closed when the em/strong already holds an em or
-          // strong child and the text after the last such child has no
-          // leading space (`**a *b*c***` -> the * lands inside, but
-          // `**a *b* c***` leaves it outside). Only on the first match
-          // for this closer, only when no further opener of the same
-          // char is left, and at most 2 delims move in.
+          // strong child OF A DIFFERENT KIND (em inside strong, or
+          // strong inside em — not em inside em) and the text after
+          // the last such child has no leading space. Only on the
+          // first match for this closer, only when no further opener
+          // of the same char is left, and at most 2 delims move in.
           {
-            let hasEmChild = false;
+            let hasDiffChild = false;
             let ch = em.ch;
             while (ch) {
-              if (ch.t === 5 || ch.t === 6 || ch.t === 7) {
-                hasEmChild = true;
+              if ((ch.t === 5 || ch.t === 6 || ch.t === 7) && ch.t !== tag) {
+                hasDiffChild = true;
                 break;
               }
               ch = ch.n;
@@ -1100,7 +1100,7 @@ function processEmphasis(delimiters) {
             const lastHasSpace =
               last && last.t === 0 && last.s.charCodeAt(0) === 32;
             let moreOpeners = false;
-            if (hasEmChild && !lastHasSpace && !current.didMatch) {
+            if (hasDiffChild && !lastHasSpace && !current.didMatch) {
               let o = openerPrev;
               while (o) {
                 if (o.c === current.c && o.canOpen && o.par === current.par) {
@@ -1110,7 +1110,7 @@ function processEmphasis(delimiters) {
                 o = o.dprev;
               }
             }
-            if (hasEmChild && !lastHasSpace && !current.didMatch && !moreOpeners) {
+            if (hasDiffChild && !lastHasSpace && !current.didMatch && !moreOpeners) {
               if (current.len <= 2) {
                 unlinkNode(current);
                 appendNode(em, current);
