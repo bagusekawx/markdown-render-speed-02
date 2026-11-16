@@ -1300,6 +1300,22 @@ function parseInline(src, ctx) {
       }
       if (close >= 0) {
         flushText(i);
+        // Count backtick runs inside the span content: an odd count
+        // poisons the bracket (emphasis after it cannot form, and
+        // the link is blocked if any emphasis delimiter follows).
+        let innerRuns = 0;
+        for (let q = j; q < close; q++) {
+          if (src.charCodeAt(q) === 96) {
+            innerRuns++;
+            while (q < close && src.charCodeAt(q) === 96) q++;
+            q--;
+          }
+        }
+        if (innerRuns % 2 === 1) {
+          for (const br of brackets) {
+            if (br.active) br.poisoned = true;
+          }
+        }
         let content = src.slice(j, close);
         if (content.indexOf('\n') >= 0) content = content.replace(/\n/g, ' ');
         if (
@@ -1316,11 +1332,11 @@ function parseInline(src, ctx) {
         i = close + runLen;
         textStart = i;
       } else {
-        // Unmatched backticks: count them per open bracket. A link
-        // is blocked only when its text holds exactly ONE unmatched
-        // backtick run (0 or 2+ do not block).
+        // Unmatched backtick run: count it per open bracket. A link
+        // is blocked when its text holds an ODD number of unmatched
+        // runs.
         for (const br of brackets) {
-          if (br.active) br.unmatchedBt = (br.unmatchedBt || 0) + 1;
+          if (br.active) br.btRuns = (br.btRuns || 0) + 1;
         }
         i = j;
       }
@@ -1337,6 +1353,20 @@ function parseInline(src, ctx) {
         // Runs of 3+ tildes never form strikethrough (GFM): they stay
         // literal text. (flushText already ran; the run is re-included
         // in the text at the next flush.)
+        i = j;
+        continue;
+      }
+      // In a bracket poisoned by an odd-inner-backtick code span,
+      // emphasis delimiters cannot form: treat the run as literal
+      // text and mark the bracket (its link is blocked).
+      let poisonedBr = null;
+      for (const br of brackets) {
+        if (br.active && br.poisoned) {
+          poisonedBr = br;
+          br.emAfterPoison = true;
+        }
+      }
+      if (poisonedBr) {
         i = j;
         continue;
       }
@@ -1412,10 +1442,11 @@ function parseInline(src, ctx) {
         continue;
       }
       const br = brackets[bIdx];
-      // A bracket whose text holds exactly one unmatched backtick
-      // run can never form a link or image: deactivate it and treat
-      // ] as literal.
-      if (br.unmatchedBt === 1) {
+      // A bracket whose text holds an odd number of unmatched
+      // backtick runs, or that was poisoned by an odd-inner-backtick
+      // code span followed by an emphasis delimiter, can never form
+      // a link or image: deactivate it and treat ] as literal.
+      if ((br.btRuns || 0) % 2 === 1 || br.emAfterPoison) {
         br.active = false;
         i++;
         continue;
