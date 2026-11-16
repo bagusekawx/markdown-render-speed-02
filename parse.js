@@ -1892,15 +1892,50 @@ function parseInline(src, ctx) {
       if (s0 < i && gfmBoundaryOk(src, s0)) {
         const domEnd = scanEmailDomain(src, i + 1);
         // A '_' right after the domain invalidates the email, unless
-        // it starts a '__' emphasis run.
-        const badTail =
-          domEnd > 0 &&
-          domEnd < n &&
-          src.charCodeAt(domEnd) === 95 &&
-          (domEnd + 1 >= n || src.charCodeAt(domEnd + 1) !== 95);
+        // it starts a '__' run or pairs with an earlier '_' opener
+        // (an emphasis closer: `_x a@b.c_` still autolinks).
+        let badTail = false;
+        let emailEnd = domEnd;
+        if (domEnd > 0 && domEnd < n && src.charCodeAt(domEnd) === 95) {
+          const next2 = domEnd + 1 < n ? src.charCodeAt(domEnd + 1) : 0;
+          const next2Alnum =
+            (next2 >= 48 && next2 <= 57) ||
+            (next2 >= 65 && next2 <= 90) ||
+            (next2 >= 97 && next2 <= 122);
+          // '_' followed by alnum is part of the address
+          // (foo@bar.com_baz links): extend the domain past it.
+          if (next2Alnum) {
+            let k = domEnd;
+            while (k < n) {
+              const cc = src.charCodeAt(k);
+              if (
+                cc === 95 ||
+                (cc >= 48 && cc <= 57) ||
+                (cc >= 65 && cc <= 90) ||
+                (cc >= 97 && cc <= 122)
+              ) {
+                k++;
+              } else {
+                break;
+              }
+            }
+            emailEnd = k;
+          } else if (next2 !== 95) {
+            // Single '_' not followed by alnum or '_': check for a
+            // matching opener (an emphasis closer still autolinks).
+            let hasOpener = false;
+            for (const d of delimiters) {
+              if (d.c === '_' && d.canOpen && d.pos < i) {
+                hasOpener = true;
+                break;
+              }
+            }
+            badTail = !hasOpener;
+          }
+        }
         if (domEnd > 0 && !badTail) {
           // Remove nodes already created inside the local part (e.g. a
-          // '_' delimiter run): the email replaces all of [s0, domEnd).
+          // '_' delimiter run): the email replaces all of [s0, emailEnd).
           let tail = list.cl;
           while (tail && tail.pos !== undefined && tail.pos >= s0) {
             const prev = tail.p;
@@ -1911,13 +1946,13 @@ function parseInline(src, ctx) {
             unlinkNode(tail);
             tail = prev;
           }
-          const text = src.slice(s0, domEnd);
+          const text = src.slice(s0, emailEnd);
           flushText(s0);
           const node = mkNode(11);
           node.href = 'mailto:' + cleanUrl(text);
           node.s = cleanAttr(text);
           appendNode(list, node);
-          i = domEnd;
+          i = emailEnd;
           textStart = i;
           continue;
         }
