@@ -2678,6 +2678,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
     let leaf = null;
     let matchedContainer = false;
     let brokeAtQuote = false;
+    let brokeAtPad = -1;
 
     // Phase 1: match open containers.
     for (;;) {
@@ -2703,7 +2704,10 @@ function parseBlocks(lines, endsWithNL, ctx) {
           matchedContainer = true;
         } else {
           const ind = indentFrom(line, offset, col, spaces);
-          if (ind.indent < last.pad) break;
+          if (ind.indent < last.pad) {
+            brokeAtPad = last.pad;
+            break;
+          }
           const a = advCols(line, offset, col, spaces, last.pad);
           offset = a.offset;
           col = a.col;
@@ -2723,22 +2727,68 @@ function parseBlocks(lines, endsWithNL, ctx) {
     if (!leaf && !brokeAtQuote) {
       // Phase 1 broke at a list container, but a fenced code block is
       // open: marked keeps consuming lines as code content even when
-      // they do not match the enclosing list. (A failed blockquote
-      // match does end the code block.)
+      // they do not match the enclosing list — but only if a closing
+      // fence exists later. If no closing fence follows, the code
+      // block ends when the list ends.
       const tip = deepestOpen();
       if (tip.t === 'code' && tip.fenced) {
-        if (
+        const lineIndent = indentFrom(line, 0, 0, 0).indent;
+        const padOk =
+          brokeAtPad < 0 || blankFrom(line, 0) || lineIndent >= brokeAtPad;
+        if (!padOk) {
+          // Under-indented: look ahead for a closing fence. If one
+          // exists before any top-level block start, keep consuming.
+          let hasFence = false;
+          for (let k = li + 1; k < lines.length && k < li + 100; k++) {
+            const lk = lines[k];
+            if (blankFrom(lk, 0)) continue;
+            if (
+              isClosingFence(lk, 0, 0, 0, tip.fenceCh, tip.fenceLen)
+            ) {
+              hasFence = true;
+              break;
+            }
+            // A top-level block start (heading, quote, list, HR) at
+            // an indent below the list pad, before any fence, means
+            // the code block is over.
+            const indK = indentFrom(lk, 0, 0, 0);
+            if (indK.indent >= brokeAtPad) continue;
+            const first = lk.charCodeAt(indK.offset);
+            if (first === 35 || first === 62 || first === 45 || first === 42 || first === 43) break;
+            if (first >= 48 && first <= 57) {
+              const m = lk.slice(indK.offset).match(/^(\d+)[.)]\s/);
+              if (m) break;
+            }
+          }
+          if (!hasFence) {
+            finalizeBlock(tip);
+            // Fall through: the line is parsed as a fresh block.
+          } else if (
+            isClosingFence(line, offset, col, spaces, tip.fenceCh, tip.fenceLen)
+          ) {
+            tip.closed = true;
+            finalizeBlock(tip);
+            continue;
+          } else {
+            tip.lines.push({
+              s: contentAfter(line, offset, col, spaces, tip.fenceIndent, true, tabBase),
+              term: terminated,
+            });
+            continue;
+          }
+        } else if (
           isClosingFence(line, offset, col, spaces, tip.fenceCh, tip.fenceLen)
         ) {
           tip.closed = true;
           finalizeBlock(tip);
+          continue;
         } else {
           tip.lines.push({
             s: contentAfter(line, offset, col, spaces, tip.fenceIndent, true, tabBase),
             term: terminated,
           });
+          continue;
         }
-        continue;
       }
     }
     if (leaf && leaf.t === 'code' && leaf.fenced) {
