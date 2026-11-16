@@ -1496,7 +1496,9 @@ function parseInline(src, ctx) {
         // Full or collapsed reference [label] or []. If a complete
         // [...] follows but matches nothing, there is NO shortcut
         // fallback; if there is no complete [...], fall back.
-        const lbl = parseRefLabel(src, after);
+        // A poisoned bracket (odd-inner-backtick code span) never
+        // forms a reference link (neither full nor shortcut).
+        const lbl = br.poisoned ? null : parseRefLabel(src, after);
         if (lbl) {
           const rawLabel =
             lbl.raw === '' ? src.slice(br.pos + 1, i) : lbl.raw;
@@ -1509,7 +1511,7 @@ function parseInline(src, ctx) {
               title = ref.title;
             }
           }
-        } else {
+        } else if (!br.poisoned) {
           const ref = shortcutRef();
           if (ref) {
             linkEnd = i + 1;
