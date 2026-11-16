@@ -893,12 +893,21 @@ function trimGfmUrl(src, start, end) {
 
 // Scan a path after a GFM domain: any chars except whitespace, < and >.
 // Returns the end index (exclusive) after trimming trailing punctuation.
+// A '(' that follows an unmatched ')' ends the URL (the ')' was not part
+// of a balanced pair, so the '(' starts something else).
 function scanGfmPath(src, i) {
   const n = src.length;
   let j = i;
+  let balance = 0;
   while (j < n) {
     const c = src.charCodeAt(j);
     if (c === 32 || c === 9 || c === 10 || c === 60 || c === 62) break;
+    if (c === 40) {
+      if (balance < 0) break;
+      balance++;
+    } else if (c === 41) {
+      balance--;
+    }
     j++;
   }
   return trimGfmUrl(src, i, j);
@@ -1597,9 +1606,18 @@ function parseInline(src, ctx) {
         const domEnd = scanDomain(src, i + 4);
         if (domEnd > 0) {
           let end = scanGfmPath(src, domEnd);
-          // If a [ bracket is open, the autolink must not swallow the
-          // ] that closes it: stop before the first ].
-          if (brackets.some(b => b.active)) {
+          // If a [ bracket is open whose content holds no link yet,
+          // the autolink must not swallow the ] that closes it: stop
+          // before the first ]. (A bracket already holding a link
+          // cannot form another, so its ] stays in the URL.)
+          let openBr = null;
+          for (let k = brackets.length - 1; k >= 0; k--) {
+            if (brackets[k].active) {
+              openBr = brackets[k];
+              break;
+            }
+          }
+          if (openBr && !containsLink(openBr.node.n)) {
             const br = src.indexOf(']', domEnd);
             if (br >= 0 && br < end) end = trimGfmUrl(src, i, br);
           }
@@ -1652,9 +1670,17 @@ function parseInline(src, ctx) {
         const domEnd = scanDomain(src, i + 3);
         if (domEnd > 0) {
           let end = scanGfmPath(src, domEnd);
-          // If a [ bracket is open, the autolink must not swallow the
-          // ] that closes it: stop before the first ].
-          if (brackets.some(b => b.active)) {
+          // If a [ bracket is open whose content holds no link yet,
+          // the autolink must not swallow the ] that closes it: stop
+          // before the first ].
+          let openBr = null;
+          for (let k = brackets.length - 1; k >= 0; k--) {
+            if (brackets[k].active) {
+              openBr = brackets[k];
+              break;
+            }
+          }
+          if (openBr && !containsLink(openBr.node.n)) {
             const br = src.indexOf(']', domEnd);
             if (br >= 0 && br < end) end = trimGfmUrl(src, s0, br);
           }
