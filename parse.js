@@ -1572,7 +1572,13 @@ function parseInline(src, ctx) {
       if (gfmBoundaryOk(src, i)) {
         const domEnd = scanDomain(src, i + 4);
         if (domEnd > 0) {
-          const end = scanGfmPath(src, domEnd);
+          let end = scanGfmPath(src, domEnd);
+          // If a [ bracket is open, the autolink must not swallow the
+          // ] that closes it: stop before the first ].
+          if (brackets.some(b => b.active)) {
+            const br = src.indexOf(']', domEnd);
+            if (br >= 0 && br < end) end = trimGfmUrl(src, i, br);
+          }
           const text = src.slice(i, end);
           flushText(i);
           const node = mkNode(11);
@@ -1621,7 +1627,13 @@ function parseInline(src, ctx) {
       ) {
         const domEnd = scanDomain(src, i + 3);
         if (domEnd > 0) {
-          const end = scanGfmPath(src, domEnd);
+          let end = scanGfmPath(src, domEnd);
+          // If a [ bracket is open, the autolink must not swallow the
+          // ] that closes it: stop before the first ].
+          if (brackets.some(b => b.active)) {
+            const br = src.indexOf(']', domEnd);
+            if (br >= 0 && br < end) end = trimGfmUrl(src, s0, br);
+          }
           const text = src.slice(s0, end);
           flushText(s0);
           const node = mkNode(11);
