@@ -3228,10 +3228,22 @@ function renderBlock(node, refs, out) {
     case 'fence': {
       let lines = node.lines;
       // Backtick fences strip up to the fence indent from each content
-      // line; tilde fences do not (a marked quirk).
+      // line; tilde fences do not (a marked quirk). The strip is by
+      // CHARACTER count, not columns: strip min(content line's leading
+      // whitespace run, opening indent) chars, so a leading tab counts
+      // as one char and vanishes whole when the opening is indented.
       if (node.ch === 96 && node.fenceIndent > 0) {
         const stripped = new Array(lines.length);
-        for (let k = 0; k < lines.length; k++) stripped[k] = stripCols(lines[k], node.fenceIndent, 0);
+        for (let k = 0; k < lines.length; k++) {
+          const l = lines[k];
+          let w = 0;
+          while (w < l.length) {
+            const c = l.charCodeAt(w);
+            if (c === 32 || c === 9 || c === 13 || c === 12 || c === 11) w++;
+            else break;
+          }
+          stripped[k] = w === 0 ? l : l.slice(w < node.fenceIndent ? w : node.fenceIndent);
+        }
         lines = stripped;
       }
       out.push('<pre><code');
