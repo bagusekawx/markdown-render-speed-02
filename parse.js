@@ -3023,6 +3023,22 @@ function parseBlocks(lines, endsWithNL, ctx) {
     if (openPara && openParaLazy && offset === 0) {
       const ind = indentFrom(line, offset, col, spaces);
       content = line.slice(ind.offset);
+      // A lazy line of only `=`s (a setext pattern) inside a
+      // blockquote is kept as paragraph content with exactly 4
+      // leading spaces (`> foo\nbar\n===` -> `    ===`), but only
+      // when the paragraph already holds 2+ lines.
+      if (/^=+\s*$/.test(content) && openPara.lines.length >= 2) {
+        let anc = openPara.parent;
+        let inQuote = false;
+        while (anc) {
+          if (anc.t === 'quote') {
+            inQuote = true;
+            break;
+          }
+          anc = anc.parent;
+        }
+        if (inQuote) content = '    ' + content.trim();
+      }
     } else {
       content = contentAfter(line, offset, col, spaces, 0, true, tabBase);
     }
