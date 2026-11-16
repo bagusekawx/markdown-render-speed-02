@@ -2765,10 +2765,20 @@ function parseBlocks(lines, endsWithNL, ctx) {
       // block ends when the list ends.
       const tip = deepestOpen();
       if (tip.t === 'code' && tip.fenced) {
-        const lineIndent = indentFrom(line, 0, 0, 0).indent;
+        // The line's indent is measured from the position where
+        // phase 1 broke (relative to the enclosing container), to
+        // match brokeAtPad's frame.
+        const lineIndent = indentFrom(line, offset, col, spaces).indent;
         const padOk =
           brokeAtPad < 0 || blankFrom(line, 0) || lineIndent >= brokeAtPad;
-        if (!padOk) {
+        // A new list item at the broken list's level ends the code
+        // block (it starts a sibling item, not code content).
+        const listStart =
+          !padOk && matchListItem(line, 0, 0, 0) !== null;
+        if (listStart) {
+          finalizeBlock(tip);
+          // Fall through: the line is parsed as a fresh block.
+        } else if (!padOk) {
           // Under-indented: look ahead for a closing fence. If one
           // exists before any top-level block start, keep consuming.
           let hasFence = false;
