@@ -964,9 +964,18 @@ function parseInline(src, refs) {
       const run = j - i;
       let k = j;
       let found = -1;
+      const hasActiveBracket = brackets.some((b) => b.active);
       while (k < N) {
         const nb = src.indexOf('`', k);
         if (nb === -1) break;
+        // a code span inside link text cannot span a newline to find its
+        // closer ("[docs each ``url`](...)" — the next "``" is on a later
+        // line, so the "``" stays literal and the link forms). On the same
+        // line it CAN cross ']' ("[not a `link](/foo`)" is a code span).
+        if (hasActiveBracket) {
+          const nl = src.indexOf('\n', k);
+          if (nl !== -1 && nl < nb) break;
+        }
         let e = nb;
         while (e < N && src.charCodeAt(e) === 96) e++;
         if (e - nb === run) { found = nb; break; }
@@ -2278,10 +2287,14 @@ function parseBlocks(lines, start, end, refs, lazy, spaceLines, inListItem) {
           j++;
         }
       }
-      // an HTML block carries a trailing newline iff the line right after it
-      // is not a truly EMPTY line: a whitespace-only line ("\t", "   ")
-      // still gets the newline, only "" suppresses it.
-      pushBlock({ t: 'html', text: content.join('\n'), trailingNL: j < end && lines[j].length > 0 });
+      // trailing newline: for types 1-5, a whitespace-only line ("\t")
+      // after the block still gets the newline — only a truly EMPTY line
+      // suppresses it. For types 6-7 (which end AT a blank line), any
+      // blank line — empty or whitespace-only — suppresses it.
+      const nextBlank = j < end && isBlankLine(lines[j]);
+      const nextEmpty = j < end && lines[j].length === 0;
+      const trailingNL = html.type <= 5 ? (j < end && !nextEmpty) : (j < end && !nextBlank);
+      pushBlock({ t: 'html', text: content.join('\n'), trailingNL });
       i = j;
       continue;
     }
