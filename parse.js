@@ -1654,15 +1654,40 @@ function parseInline(src, ctx) {
     }
 
     if (c === 64 && !ctx.inLink) {
-      // GFM email autolink: look back for the local part.
+      // GFM email autolink: look back for the local part. A * or ~ is
+      // never part of the local part (it is an emphasis delimiter); a
+      // _ is part of it only when intra-word (otherwise it delimits).
       let s0 = i - 1;
-      while (s0 >= 0 && isEmailLocalChar(src.charCodeAt(s0))) s0--;
+      while (s0 >= 0) {
+        const cc = src.charCodeAt(s0);
+        if (cc === 42 || cc === 126) break;
+        if (cc === 95) {
+          // Intra-word _ (alnum on both sides) is a local char.
+          const before = s0 > 0 ? src.charCodeAt(s0 - 1) : 0;
+          const after = s0 + 1 < n ? src.charCodeAt(s0 + 1) : 0;
+          const beforeAlnum =
+            (before >= 48 && before <= 57) ||
+            (before >= 65 && before <= 90) ||
+            (before >= 97 && before <= 122);
+          const afterAlnum =
+            (after >= 48 && after <= 57) ||
+            (after >= 65 && after <= 90) ||
+            (after >= 97 && after <= 122);
+          if (!beforeAlnum || !afterAlnum) break;
+        } else if (!isEmailLocalChar(cc)) break;
+        s0--;
+      }
       s0++;
       if (s0 < i && gfmBoundaryOk(src, s0)) {
         const domEnd = scanEmailDomain(src, i + 1);
-        // A '_' (or other word char) right after the domain invalidates
-        // the email (it would be part of a longer word).
-        if (domEnd > 0 && !(domEnd < n && src.charCodeAt(domEnd) === 95)) {
+        // A '_' right after the domain invalidates the email, unless
+        // it starts a '__' emphasis run.
+        const badTail =
+          domEnd > 0 &&
+          domEnd < n &&
+          src.charCodeAt(domEnd) === 95 &&
+          (domEnd + 1 >= n || src.charCodeAt(domEnd + 1) !== 95);
+        if (domEnd > 0 && !badTail) {
           // Remove nodes already created inside the local part (e.g. a
           // '_' delimiter run): the email replaces all of [s0, domEnd).
           let tail = list.cl;
