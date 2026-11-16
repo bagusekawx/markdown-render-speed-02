@@ -300,6 +300,12 @@ function unescapeBackslashes(s) {
 
 function makeNode(t) { return { t, p: null, ch: null, s: null }; }
 
+// marked's Lexer state: an inline <a ...> tag sets inLink, suppressing
+// extended autolinks (bare URL / www. / email) until a matching </a>.
+// The state persists across blocks for the whole document, so an unclosed
+// <a> suppresses autolinks for the rest of the doc. Reset per parse().
+let inLink = false;
+
 function parseInline(src, refs) {
   const N = src.length;
   const root = makeNode(10);
@@ -1301,6 +1307,11 @@ function parseInline(src, refs) {
         hn.s = src.slice(i, tagEnd);
         hn.p = root;
         root.ch.push(hn);
+        // marked's inLink state (startATag /^<a /i", endATag "/^<\\/a>/i"):
+        // '<a>' (no space) does NOT set it; '</a >' (space) does NOT clear it.
+        const t1 = hn.s.charCodeAt(1);
+        if (!inLink && hn.s.length > 2 && (t1 === 97 || t1 === 65) && hn.s.charCodeAt(2) === 32) inLink = true;
+        else if (inLink && hn.s.length > 3 && t1 === 47 && (hn.s.charCodeAt(2) === 97 || hn.s.charCodeAt(2) === 65) && hn.s.charCodeAt(3) === 62) inLink = false;
         i = tagEnd;
         continue;
       }
@@ -1360,7 +1371,7 @@ function parseInline(src, refs) {
         (prevCp >= 48 && prevCp <= 57) || (prevCp >= 65 && prevCp <= 90) || (prevCp >= 97 && prevCp <= 122) ||
         prevCp === 46 || prevCp === 47 || prevCp === 58 || prevCp === 63 || prevCp === 35 ||
         prevCp === 61 || prevCp === 38 || prevCp === 37 || prevCp === 43 || prevCp === 64);
-      if (atBoundary) {
+      if (!inLink && atBoundary) {
         const ext = matchExtendedAutolink(i);
         if (ext) {
           flushText();
@@ -1382,7 +1393,7 @@ function parseInline(src, refs) {
 
     // email autolink: '@' with a local part in the buffer
     if (c === 64) {
-      const em = matchEmailFromBuffer(i);
+      const em = inLink ? null : matchEmailFromBuffer(i);
       if (em) {
         removeTrailingChars(em.localLen);
         flushText();
@@ -3095,6 +3106,7 @@ function renderListItem(item, tight, refs, out) {
 // ---------------- entry point ----------------
 
 export function parse(src) {
+  inLink = false;
   const lines = splitLines(src);
   const refs = new Map();
   const blocks = parseBlocks(lines, 0, lines.length, refs);
