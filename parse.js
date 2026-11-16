@@ -306,11 +306,156 @@ function makeNode(t) { return { t, p: null, ch: null, s: null }; }
 // <a> suppresses autolinks for the rest of the doc. Reset per parse().
 let inLink = false;
 
+// Regions of an inline source that marked's emStrongMask hides from the
+// emphasis scan: links, code spans, and HTML tags, found by marked's
+// blockSkip scan on text whose code-span inner backticks were first blanked
+// (anyPunctuationOutsideCode). The blanking is what creates PHANTOM code
+// spans: "``url` ... `deno` ... _issue table_ ``" masks the "_..._" because
+// the inner backticks become '+' and the whole span matches as one code span.
+function computeMaskedRegions(src) {
+  const N = src.length;
+  // step 1: blank backticks inside Ot code spans (inline code regex: the
+  // content may itself contain backticks, matched lazily to the first
+  // same-length closer with non-empty content).
+  const chars = src.split('');
+  {
+    let i = 0;
+    while (i < N) {
+      const c0 = src.charCodeAt(i);
+      if (c0 === 92) {
+        // backslash escape (\ + punct): both chars blanked, the escaped
+        // char is never a code delimiter (Ot's \\(punct) alternative)
+        if (i + 1 < N && isPunctCode(src.charCodeAt(i + 1))) { chars[i] = '+'; chars[i + 1] = '+'; i += 2; continue; }
+        i++; continue;
+      }
+      if (c0 !== 96) { i++; continue; }
+      let j = i;
+      while (j < N && src.charCodeAt(j) === 96) j++;
+      const run = j - i;
+      let k = j, found = -1;
+      while (k < N) {
+        const nb = src.indexOf('`', k);
+        if (nb === -1) break;
+        let e = nb;
+        while (e < N && src.charCodeAt(e) === 96) e++;
+        if (e - nb === run && nb > j) { found = nb; break; }
+        k = e;
+      }
+      if (found !== -1) {
+        for (let p = j; p < found; p++) if (chars[p] === '`') chars[p] = '+';
+        i = found + run;
+      } else {
+        i = j;
+      }
+    }
+  }
+  const t = chars.join('');
+  // step 2: blockSkip scan (link | code | html), left-to-right, non-overlapping.
+  const regions = [];
+  let i = 0;
+  while (i < N) {
+    const c = t.charCodeAt(i);
+    if (c === 91) {
+      const end = matchMaskLink(t, i);
+      if (end !== -1) { regions.push([i, end]); i = end; continue; }
+    }
+    if (c === 96) {
+      let j = i;
+      while (j < N && t.charCodeAt(j) === 96) j++;
+      const run = j - i;
+      const nb = t.indexOf('`', j);
+      if (nb !== -1) {
+        let e = nb;
+        while (e < N && t.charCodeAt(e) === 96) e++;
+        if (e - nb === run && nb > j) { regions.push([i, e]); i = e; continue; }
+      }
+      i = j;
+      continue;
+    }
+    if (c === 60 && i + 1 < N && t.charCodeAt(i + 1) !== 32) {
+      const gt = t.indexOf('>', i + 1);
+      if (gt !== -1) {
+        let ok = true;
+        for (let p = i + 1; p < gt; p++) {
+          const cc = t.charCodeAt(p);
+          if (cc === 60 || cc === 62) { ok = false; break; }
+        }
+        if (ok) { regions.push([i, gt + 1]); i = gt + 1; continue; }
+      }
+    }
+    i++;
+  }
+  return regions;
+}
+
+// blockSkip link match starting at t[pos] === '['. Returns the end index
+// (exclusive) or -1. Label allows backtick pairs (equal runs, no backticks
+// inside) and escaped chars, but no nested '['; dest allows one level of
+// nested parens.
+function matchMaskLink(t, pos) {
+  const N = t.length;
+  let i = pos + 1;
+  while (i < N) {
+    const c = t.charCodeAt(i);
+    if (c === 93) break;
+    if (c === 92) return -1; // no escape alternative in the label pattern
+    if (c === 91) return -1;
+    if (c === 96) {
+      let j = i;
+      while (j < N && t.charCodeAt(j) === 96) j++;
+      const run = j - i;
+      let k = j;
+      while (k < N && t.charCodeAt(k) !== 96) k++;
+      if (k === j) return -1;
+      let e = k;
+      while (e < N && t.charCodeAt(e) === 96) e++;
+      if (e - k !== run) return -1;
+      i = e;
+      continue;
+    }
+    i++;
+  }
+  if (i >= N || t.charCodeAt(i) !== 93) return -1;
+  i++;
+  if (i >= N || t.charCodeAt(i) !== 40) return -1;
+  i++;
+  while (i < N) {
+    const c = t.charCodeAt(i);
+    if (c === 41) return i + 1;
+    if (c === 92 && i + 1 < N) { i += 2; continue; }
+    if (c === 40) {
+      let k = i + 1;
+      let ok = false;
+      while (k < N) {
+        const cc = t.charCodeAt(k);
+        if (cc === 41) { ok = true; break; }
+        if (cc === 92 && k + 1 < N) { k += 2; continue; }
+        if (cc === 40) return -1;
+        k++;
+      }
+      if (!ok) return -1;
+      i = k + 1;
+      continue;
+    }
+    i++;
+  }
+  return -1;
+}
+
 function parseInline(src, refs) {
   const N = src.length;
   const root = makeNode(10);
   root.ch = [];
   const delims = []; // delimiter records in document order
+  // masked regions (marked's emStrongMask): emphasis delimiters inside
+  // them are invisible to the emphasis scan. Positions increase
+  // monotonically during the scan, so a pointer suffices.
+  const maskRegions = computeMaskedRegions(src);
+  let maskIdx = 0;
+  function maskedAt(pos) {
+    while (maskIdx < maskRegions.length && maskRegions[maskIdx][1] <= pos) maskIdx++;
+    return maskIdx < maskRegions.length && maskRegions[maskIdx][0] <= pos;
+  }
   const brackets = []; // link openers: {n, img, active}
   let activeBrackets = 0; // count of active brackets (avoids .some() scans)
   let buf = '';
@@ -1048,9 +1193,53 @@ function parseInline(src, refs) {
       let k = j;
       let found = -1;
       const hasActiveBracket = activeBrackets > 0;
+      // inside link text, a code span cannot swallow the link's closer IF
+      // the link would form: marked's label regex pairs backtick runs
+      // consecutively (mismatched lengths OK), so a label whose runs pair
+      // up (or end with a 2+ run right before ']') forms the link and
+      // bounds the code span to the label; a label with an unpaired lone
+      // backtick never forms the link, so the code span may swallow the
+      // ']' ("[not a `link](/foo`)" stays a code span).
+      let linkClose = -1;
+      if (hasActiveBracket) {
+        let q = j;
+        while (q < N) {
+          const cb = src.indexOf(']', q);
+          if (cb === -1) break;
+          const after = src.charCodeAt(cb + 1);
+          if (after === 40 || after === 91) { linkClose = cb; break; }
+          q = cb + 1;
+        }
+      }
+      let labelChecked = false, labelPairable = false;
       while (k < N) {
         const nb = src.indexOf('`', k);
         if (nb === -1) break;
+        if (linkClose !== -1 && nb > linkClose) {
+          if (!labelChecked) {
+            labelChecked = true;
+            let bStart = -1;
+            for (let b = brackets.length - 1; b >= 0; b--) {
+              if (brackets[b].active) { bStart = brackets[b].n.srcStart; break; }
+            }
+            if (bStart !== -1 && bStart < linkClose) {
+              let runs = 0, lastRunLen = 0, lastRunEnd = -1;
+              let p = bStart;
+              while (p < linkClose) {
+                if (src.charCodeAt(p) === 96) {
+                  let e = p;
+                  while (e < linkClose && src.charCodeAt(e) === 96) e++;
+                  runs++;
+                  lastRunLen = e - p;
+                  lastRunEnd = e;
+                  p = e;
+                } else p++;
+              }
+              labelPairable = runs % 2 === 0 || (lastRunLen >= 2 && lastRunEnd === linkClose);
+            }
+          }
+          if (labelPairable) break;
+        }
         // a code span inside link text cannot span a newline to find its
         // closer ("[docs each ``url`](...)" — the next "``" is on a later
         // line, so the "``" stays literal and the link forms). On the same
@@ -1123,7 +1312,7 @@ function parseInline(src, refs) {
       dn.s = src.slice(i, j);
       dn.p = root;
       root.ch.push(dn);
-      delims.push({ n: dn, ch: c, len: run, open: canOpen, close: canClose });
+      delims.push({ n: dn, ch: c, len: run, open: canOpen, close: canClose, masked: maskedAt(i) });
       i = j;
       continue;
     }
@@ -1483,6 +1672,21 @@ function stripExtendedAutolinks(node) {
 // delimiters from the matched runs go INSIDE the em/strong node, because
 // marked re-parses the inner text ("*a **b** c***" keeps its "**" inside
 // the em, where it closes the inner strong).
+// A masked delimiter counts as masked only outside link/image nodes:
+// marked re-tokenizes a link's label with fresh masking computed on the
+// label alone, so paragraph-level masked regions do not hide the label's
+// own emphasis.
+function maskedForScan(D) {
+  if (!D.masked) return false;
+  let p = D.n.p;
+  while (p) {
+    if (p.t === 2 || p.t === 3) return false;
+    if (p.t === 10) return true;
+    p = p.p;
+  }
+  return true;
+}
+
 function processEmphasisMarked(delims) {
   let oi = 0;
   while (oi < delims.length) {
@@ -1501,7 +1705,7 @@ function processEmphasisMarked(delims) {
       let seen = 0, u1 = null, s = null;
       for (let j = oi + 1; j < delims.length && seen < 3; j++) {
         const D = delims[j];
-        if (D.n.p !== parent || D.ch === 126 || D.len === 0) continue;
+        if (D.n.p !== parent || D.ch === 126 || D.len === 0 || maskedForScan(D)) continue;
         seen++;
         if (seen === 1) u1 = D;
         else if (seen === 2) s = D;
@@ -1516,7 +1720,7 @@ function processEmphasisMarked(delims) {
       for (let j = oi + 1; j < delims.length; j++) {
         const D = delims[j];
         if (D === skipRec) continue;
-        if (D.n.p !== parent || D.ch !== O.ch || D.len === 0 || (!D.open && !D.close)) continue;
+        if (D.n.p !== parent || D.ch !== O.ch || D.len === 0 || (!D.open && !D.close) || maskedForScan(D)) continue;
         if (D.open && !D.close) { m += D.len; continue; }
         if ((D.open && D.close) || O.close) {
           if (retry && D.open && D.close) break; // no match for this attempt
