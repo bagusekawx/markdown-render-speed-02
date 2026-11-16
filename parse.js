@@ -2323,6 +2323,7 @@ function parseBlocks(lines, srcEndsNL) {
             // tabs are expanded (relative to the source column).
             if (node.t === 'fence') node.lines.push(node.inContainer ? expandLeadingTabs(curRest(cur), cur.col) : curRest(cur));
             else node.lines.push(stripCols(curRest(cur), 4, cur.col));
+            if (node.t === 'fence') node.lastLazy = false;
             absorbed = true;
           } else {
             closeLeaf();
@@ -2376,13 +2377,15 @@ function parseBlocks(lines, srcEndsNL) {
       const f = openLeaf.node;
       if (!leafInside) {
         // A lazy line continues a fence only when the first unmatched
-        // container is a list item (marked's list tokenizer absorbs
-        // lazy lines into the item text) and the line is not a block
-        // start. A lazy line never continues a fence in a quote or
-        // at the top level.
-        if (matched < stack.length && stack[matched].t === 'item' && !lazyBlockStart()) {
+        // container is a list item, the line is not a block start, and
+        // the fence's previous line does not end the item (the opening
+        // fence line always ends it, so a lazy line right after the
+        // opening never becomes content). A lazy line never continues
+        // a fence in a quote or at the top level.
+        if (matched < stack.length && stack[matched].t === 'item' && !lazyBlockStart() && fenceLazyAllowed(f, stack[matched].relCol)) {
           const content = curRest(cur);
           f.lines.push(f.inContainer ? expandLeadingTabs(content, cur.col) : content);
+          f.lastLazy = true;
           return;
         }
         popTo(matched);
@@ -2412,6 +2415,7 @@ function parseBlocks(lines, srcEndsNL) {
         // expanded (relative to the source column) by the container
         // tokenizer; at the top level they are kept as-is.
         f.lines.push(f.inContainer ? expandLeadingTabs(content, cur.col) : content);
+        f.lastLazy = false;
         return;
       }
     }
@@ -2815,6 +2819,48 @@ function parseBlocks(lines, srcEndsNL) {
   // of continuing it)? ATX, fences, hr, blockquotes, lists (any start
   // number — a lazy line starts a fresh chunk), and HTML blocks of any type.
   // Indented code, setext, definitions, and table delimiters do not.
+  // Can a lazy line continue the fence `f`? Marked's list tokenizer ends
+  // the item when the previous line (in the item's text) is blank,
+  // indented 4+, or starts a fence, heading, HTML block, or hr. With no
+  // content lines yet, the previous line is the opening fence line, so a
+  // lazy line right after the opening never becomes content. A previous
+  // lazy line is tested with R columns chopped off (marked slices it by
+  // the item indent). `R` is the item's content indent.
+  function fenceLazyAllowed(f, R) {
+    if (f.lines.length === 0) return false;
+    let m = f.lines[f.lines.length - 1];
+    if (f.lastLazy) m = expandLeadingTabs(m, 0).slice(R);
+    const lim = R < 3 ? R : 3;
+    let i = 0;
+    let indent = 0;
+    let spaces = 0;
+    let hasTab = false;
+    while (i < m.length) {
+      const c = m.charCodeAt(i);
+      if (c === 32) { indent++; spaces++; i++; }
+      else if (c === 9) { indent += 4; hasTab = true; i++; }
+      else break;
+    }
+    if (i >= m.length) return false; // blank
+    if (indent >= 4) return false;
+    if (!hasTab && spaces <= lim) {
+      const c = m.charCodeAt(i);
+      if (c === 96 || c === 126) {
+        let run = 0;
+        while (i + run < m.length && m.charCodeAt(i + run) === c) run++;
+        if (run >= 3) return false;
+      }
+      if (c === 35) {
+        let run = 0;
+        while (i + run < m.length && m.charCodeAt(i + run) === 35 && run < 7) run++;
+        if (run >= 1 && run <= 6 && (i + run >= m.length || m.charCodeAt(i + run) === 32 || m.charCodeAt(i + run) === 9)) return false;
+      }
+      if (c === 60 && htmlBlockStart(m, false).t !== 0) return false;
+      if ((c === 45 || c === 42 || c === 95) && isHrLine(m) !== 0) return false;
+    }
+    return true;
+  }
+
   function lazyBlockStart() {
     curPeek(cur, peek);
     if (peek.indent > 3) return false;
@@ -3026,7 +3072,7 @@ function parseBlocks(lines, srcEndsNL) {
         const info = unescapePunct(s.slice(k).trim());
         const lang = info.split(/\s/, 1)[0] || '';
         addLeaf(
-          { t: 'fence', ch: fch, len: run, lang, lines: [], fenceIndent: peek.indent, closed: false, inContainer: stack.length > 1 },
+          { t: 'fence', ch: fch, len: run, lang, lines: [], fenceIndent: peek.indent, closed: false, inContainer: stack.length > 1, lastLazy: false },
           true
         );
         return;
