@@ -306,6 +306,7 @@ function parseInline(src, refs) {
   root.ch = [];
   const delims = []; // delimiter records in document order
   const brackets = []; // link openers: {n, img, active}
+  let activeBrackets = 0; // count of active brackets (avoids .some() scans)
   let buf = '';
   let i = 0;
 
@@ -711,7 +712,7 @@ function parseInline(src, refs) {
     // A '(' that is literal link text ("[path (https://x)]") does NOT
     // count: the link must still form.
     const inParens = urlStart > 1 && src.charCodeAt(urlStart - 1) === 40 && src.charCodeAt(urlStart - 2) === 93;
-    const inBrackets = !inParens && brackets.some((b) => b.active);
+    const inBrackets = !inParens && activeBrackets > 0;
     while (j < N) {
       const c = src.charCodeAt(j);
       if (c === 32 || c === 9 || c === 10 || c === 60) break;
@@ -964,7 +965,7 @@ function parseInline(src, refs) {
       const run = j - i;
       let k = j;
       let found = -1;
-      const hasActiveBracket = brackets.some((b) => b.active);
+      const hasActiveBracket = activeBrackets > 0;
       while (k < N) {
         const nb = src.indexOf('`', k);
         if (nb === -1) break;
@@ -1060,6 +1061,7 @@ function parseInline(src, refs) {
       bn.srcStart = i + (isImg ? 2 : 1);
       root.ch.push(bn);
       brackets.push({ n: bn, img: isImg, active: true });
+      activeBrackets++;
       i += isImg ? 2 : 1;
       continue;
     }
@@ -1134,6 +1136,7 @@ function parseInline(src, refs) {
       if (href === null) {
         // not a link: deactivate this opener, ']' is literal
         opener.active = false;
+        activeBrackets--;
         // marked quirk: if the failed link text contains a code span with
         // a backtick inside, emphasis delimiters inside the "[...]" are
         // also suppressed ("[at _node `` a ` b ``_](<... b>)" keeps the
@@ -1167,6 +1170,7 @@ function parseInline(src, refs) {
         }
         if (hasLink) {
           opener.active = false;
+          activeBrackets--;
           buf += ']';
           i++;
           continue;
@@ -1191,6 +1195,7 @@ function parseInline(src, refs) {
       kids[oi] = linkNode;
       // remove the opener from the brackets stack
       brackets.splice(bi, 1);
+      activeBrackets--;
       // extended autolinks inside link text are suppressed: any extended
       // autolink node created while scanning the link text reverts to plain
       // text. (<...> autolinks stay.)
