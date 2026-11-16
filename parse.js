@@ -481,36 +481,67 @@ function matchEmail(s, i) {
   return null;
 }
 
-// Trailing punctuation the GFM autolink rules strip: ? ! . , : ; * _ ~ ' "
-function isAutolinkTrail(ch) {
+// Punctuation the GFM autolink rules may strip from the end of a link:
+// ? ! . , : ; * _ ' " ~ and ). A run of these is kept only when more link
+// text follows it; a run at the very end of the match is dropped.
+function isAutolinkPunct(ch) {
   return ch === 63 || ch === 33 || ch === 46 || ch === 44 || ch === 58 ||
-    ch === 42 || ch === 95 || ch === 126 || ch === 59 || ch === 39 || ch === 34;
+    ch === 59 || ch === 42 || ch === 95 || ch === 39 || ch === 34 ||
+    ch === 126 || ch === 41;
 }
 
-// Trim a raw GFM autolink match [start, end): strip a trailing &entity;
-// (the & and everything after it), strip trailing punctuation, and balance
-// parentheses (drop unmatched trailing ')'). Mirrors marked's _backpedal.
+// One backpedal pass over a raw GFM autolink match [start, end): scan the
+// match as a run of pieces and return where the kept prefix ends. The
+// pieces are: runs of ordinary chars (anything but the punctuation above,
+// '(' and '&'); a parenthesised group '(' ... ')' with no ')' inside; an
+// '&' that does not start an entity running to the end of the match; and a
+// run of trailing punctuation followed by more match text. A piece that
+// cannot complete ends the prefix there.
+function backpedalOnce(s, start, end) {
+  let i = start;
+  while (i < end) {
+    const c = s.charCodeAt(i);
+    if (c === 40) {
+      // '(' opens a group only when a ')' closes it before the match ends.
+      let j = i + 1;
+      while (j < end && s.charCodeAt(j) !== 41) j++;
+      if (j >= end) break;
+      i = j + 1;
+    } else if (c === 38) {
+      // '&' is dropped only when it starts &alnum+; at the end of the match.
+      let j = i + 1;
+      while (j < end && (isAlpha(s.charCodeAt(j)) || isDigit(s.charCodeAt(j)))) j++;
+      if (j > i + 1 && j < end && s.charCodeAt(j) === 59 && j === end - 1) break;
+      i++;
+    } else if (isAutolinkPunct(c)) {
+      // A punctuation run is kept whole when more text follows it. When
+      // it runs to the end of the match, leave its last char behind: the
+      // next pass eats it, so a trailing run shrinks one char per pass.
+      let j = i;
+      while (j < end && isAutolinkPunct(s.charCodeAt(j))) j++;
+      if (j >= end) { i = end - 1; break; }
+      i = j;
+    } else {
+      while (i < end) {
+        const d = s.charCodeAt(i);
+        if (d === 40 || d === 38 || isAutolinkPunct(d)) break;
+        i++;
+      }
+    }
+  }
+  return i;
+}
+
+// Trim a raw GFM autolink match [start, end): apply backpedal passes until
+// the match stops shrinking. The repetition matters: dropping an unmatched
+// ')' can expose trailing punctuation, and dropping that can expose more.
 function trimAutolink(s, start, end) {
   let e = end;
-  // A trailing &xxx; is excluded from the & — checked FIRST, because the
-  // ; is part of the entity (stripping punct first would hide it).
-  if (e > start && s.charCodeAt(e - 1) === 59) {
-    let k = e - 2;
-    while (k >= start && isWord(s.charCodeAt(k))) k--;
-    if (k >= start && s.charCodeAt(k) === 38) e = k;
+  for (;;) {
+    const next = backpedalOnce(s, start, e);
+    if (next === e) return e;
+    e = next;
   }
-  // Strip trailing punctuation repeatedly.
-  while (e > start && isAutolinkTrail(s.charCodeAt(e - 1))) e--;
-  // Balance parens: drop trailing ')' while there are more ')' than '('.
-  let open = 0;
-  let close = 0;
-  for (let p = start; p < e; p++) {
-    const c = s.charCodeAt(p);
-    if (c === 40) open++;
-    else if (c === 41) close++;
-  }
-  while (close > open && e > start && s.charCodeAt(e - 1) === 41) { e--; close--; }
-  return e;
 }
 
 // Match a GFM autolink (www. / scheme / email) starting at s[i].
@@ -2122,7 +2153,15 @@ function parseBlocks(lines, srcEndsNL) {
       if (openLeaf !== null) {
         const node = openLeaf.node;
         if (node.t === 'p' || node.t === 'table') {
-          closeLeaf();
+          // A blank-looking line that holds a tab is still a table row in
+          // marked (its table body only excludes space-only lines): the
+          // row is empty cells. A paragraph still ends on it.
+          if (node.t === 'table' && insideLeaf && curRest(cur).indexOf('\t') !== -1) {
+            node.rows.push(splitCells(curRest(cur), node.aligns.length));
+            absorbed = true;
+          } else {
+            closeLeaf();
+          }
         } else if (node.t === 'html') {
           if (node.ended) {
             node.trailNL = false;
