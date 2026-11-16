@@ -429,6 +429,41 @@ function labelValid(s, start, end) {
   return true;
 }
 
+// The code spans marked's emphasis mask sees in `s`: each maximal
+// backtick run pairs with the next run of the same length (the mask's code
+// regex matches the first equal-length closing run, with inner backticks
+// neutralized first). A run with no equal-length run after it pairs with
+// nothing. The mask hides delimiters between the runs even when the
+// tokenizer formed no code span there (a link's label can supply the
+// opening run).
+function maskCodeSpans(s) {
+  const runs = [];
+  let j = 0;
+  while (j < s.length) {
+    const c = s.charCodeAt(j);
+    // A backslash + ASCII punctuation is an escape (marked masks it to
+    // '+'): the escaped character is not a backtick run.
+    if (c === 92 && j + 1 < s.length && ASCII_PUNCT[s.charCodeAt(j + 1)] === 1) { j += 2; continue; }
+    if (c === 96) {
+      let k = j;
+      while (k < s.length && s.charCodeAt(k) === 96) k++;
+      runs.push({ s: j, e: k, len: k - j });
+      j = k;
+    } else j++;
+  }
+  const spans = [];
+  for (let a = 0; a < runs.length; a++) {
+    for (let b = a + 1; b < runs.length; b++) {
+      if (runs[b].len === runs[a].len) {
+        spans.push({ s: runs[a].s, e: runs[b].e });
+        a = b;
+        break;
+      }
+    }
+  }
+  return spans;
+}
+
 // Parse a link label "[...]" starting at s[i] === '['. Returns { label, next }
 // (label is the raw text between the brackets) or null.
 function parseLinkLabel(s, i) {
@@ -880,6 +915,85 @@ function scanInline(src, refs) {
     return 93;
   };
 
+  // Would a link form at the ']' at position k, with the brackets open
+  // now? Mirrors the closer branch's decision (inline, full reference,
+  // collapsed, shortcut, in that order) without mutating state. Used to
+  // keep code spans from swallowing a link's closing bracket.
+  const linkWouldForm = (k) => {
+    const nc = src.charCodeAt(k + 1);
+    const earliestValid = () => {
+      for (let bj = 0; bj < brackets.length; bj++) {
+        const b = brackets[bj];
+        if (!b.active) continue;
+        if (labelValid(src, b.start, k)) return b;
+      }
+      return null;
+    };
+    const nearestRef = () => {
+      for (let nb = brackets.length - 1; nb >= 0; nb--) {
+        const b = brackets[nb];
+        if (!b.active) continue;
+        if (refs.get(normalizeLabel(src.slice(b.start, k)))) return b;
+      }
+      return null;
+    };
+    if (nc === 40) {
+      if (parseInlineLink(src, k + 1) !== null && earliestValid() !== null) return true;
+      return nearestRef() !== null;
+    }
+    if (nc === 91) {
+      const lab = parseLinkLabel(src, k + 1);
+      if (lab === null) return nearestRef() !== null;
+      if (lab.label === '') {
+        for (let bj = 0; bj < brackets.length; bj++) {
+          const b = brackets[bj];
+          if (!b.active) continue;
+          if (!labelBalanced(src, b.start, k)) continue;
+          if (refs.get(normalizeLabel(src.slice(b.start, k)))) return true;
+        }
+        return false;
+      }
+      const key = normalizeLabel(lab.label);
+      if (key === '') return nearestRef() !== null;
+      return refs.get(key) !== undefined && earliestValid() !== null;
+    }
+    return nearestRef() !== null;
+  };
+
+  // Masking code spans for this paragraph: a delimiter inside one sees
+  // the mask's characters ('[', 'a', ']') as its neighbours. Returns the
+  // masked code point at `pos`, or -1 when `pos` is not inside a span.
+  const maskSpans = maskCodeSpans(src);
+  const maskedCpAt = (pos) => {
+    for (let m = 0; m < maskSpans.length; m++) {
+      const sp = maskSpans[m];
+      if (pos >= sp.s && pos < sp.e) {
+        if (pos === sp.s) return 91;
+        if (pos === sp.e - 1) return 93;
+        return 97;
+      }
+    }
+    return -1;
+  };
+  // Delimiters inside a link/image label are masked by the label's own
+  // text, not the paragraph's, so the override only applies outside any
+  // active bracket.
+  const delimCtx = (pos, run) => {
+    let p = prevCpForDelim();
+    let q = pos + run < n ? cpAt(src, pos + run) : -1;
+    let active = false;
+    for (let b = 0; b < brackets.length; b++) {
+      if (brackets[b].active) { active = true; break; }
+    }
+    if (!active) {
+      const mp = maskedCpAt(pos - 1);
+      if (mp !== -1) p = mp;
+      const mq = maskedCpAt(pos + run);
+      if (mq !== -1) q = mq;
+    }
+    return { p, q };
+  };
+
   let i = 0;
   const n = src.length;
   while (i < n) {
@@ -933,6 +1047,21 @@ function scanInline(src, refs) {
         i += run;
         continue;
       }
+      if (brackets.length > 0) {
+        // A code span must not swallow a ']' that closes a link: marked
+        // tries the link regex at '[' before the code span, so the link
+        // wins. If a link would form at any ']' inside the span, leave
+        // the backticks literal and let the ']' close the link.
+        let swallow = false;
+        for (let k = i + run; k < found; k++) {
+          if (src.charCodeAt(k) === 93 && linkWouldForm(k)) { swallow = true; break; }
+        }
+        if (swallow) {
+          textBuf += src.slice(i, i + run);
+          i += run;
+          continue;
+        }
+      }
       let content = src.slice(i + run, found);
       if (content.indexOf('\n') !== -1) content = content.replace(/\n/g, ' ');
       if (
@@ -961,8 +1090,7 @@ function scanInline(src, refs) {
     if (c === 42 || c === 95) {
       let run = 0;
       while (i + run < n && src.charCodeAt(i + run) === c) run++;
-      const p = prevCpForDelim();
-      const q = i + run < n ? cpAt(src, i + run) : -1;
+      const { p, q } = delimCtx(i, run);
       flushText();
       items.push({ d: c, n: run, p, q });
       i += run;
@@ -974,8 +1102,7 @@ function scanInline(src, refs) {
     if (c === 126) {
       let run = 0;
       while (i + run < n && src.charCodeAt(i + run) === 126) run++;
-      const p = prevCpForDelim();
-      const q = i + run < n ? cpAt(src, i + run) : -1;
+      const { p, q } = delimCtx(i, run);
       flushText();
       items.push({ d: 126, n: run, p, q });
       i += run;
