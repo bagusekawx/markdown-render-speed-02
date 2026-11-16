@@ -2970,7 +2970,13 @@ function parseBlocks(lines, endsWithNL, ctx) {
     }
     // A new block (other than a list item) cannot be a direct child of a
     // list: if phase 1 stopped inside a list, use the list's parent.
-    if (container.t === 'list') container = container.parent;
+    // Remember the list: if this line turns out to be a paragraph (not
+    // a new item), the list ends here.
+    let stoppedList = null;
+    if (container.t === 'list') {
+      stoppedList = container;
+      container = container.parent;
+    }
     // Interrupt the open paragraph (if any) and close the unmatched
     // containers up to the current container before starting a block.
     const interrupt = () => {
@@ -2978,6 +2984,13 @@ function parseBlocks(lines, endsWithNL, ctx) {
         finalizeBlock(openPara);
         openPara = null;
         openParaLazy = false;
+      }
+      // If phase 1 stopped inside a list, the list ends here (a new
+      // block that is not a list item): a following list item starts
+      // a new list, it does not reuse this one.
+      if (stoppedList) {
+        finalizeBlock(stoppedList);
+        stoppedList = null;
       }
       finalizeUpTo(container);
     };
@@ -3097,6 +3110,9 @@ function parseBlocks(lines, endsWithNL, ctx) {
           list.delim = item.delim;
           list.bullet = item.bullet;
         }
+        // The line is a list item: the list continues (reused or new),
+        // so it must not be finalized by the paragraph branch below.
+        stoppedList = null;
         const it = mkBlock('item', list);
         it.pad = item.pad;
         container = it;
@@ -3172,6 +3188,12 @@ function parseBlocks(lines, endsWithNL, ctx) {
     if (openPara) {
       openPara.lines.push(content);
     } else {
+      // A new paragraph when phase 1 stopped inside a list means the
+      // list ended: finalize it so a later list item starts fresh.
+      if (stoppedList) {
+        finalizeBlock(stoppedList);
+        stoppedList = null;
+      }
       const p = mkBlock('para', container);
       p.lines = [content];
     }
