@@ -1998,6 +1998,15 @@ function blankFrom(line, offset) {
   return true;
 }
 
+// Blank for the HTML trailing-newline rule: only spaces count; a
+// tab-only line is non-blank (`-->\n\t\npara` keeps the \n).
+function blankSpacesOnly(line) {
+  for (let j = 0; j < line.length; j++) {
+    if (line.charCodeAt(j) !== 32) return false;
+  }
+  return true;
+}
+
 function mkBlock(t, parent) {
   const b = {
     t,
@@ -2777,7 +2786,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         if (leaf.htmlType <= 5 && leaf.endTag) {
           if (line.toLowerCase().indexOf(leaf.endTag) >= 0) {
             leaf.trailingNL =
-              li + 1 < lines.length && !blankFrom(lines[li + 1], 0);
+              li + 1 < lines.length && !blankSpacesOnly(lines[li + 1]);
             finalizeBlock(leaf);
           }
         }
@@ -2919,9 +2928,9 @@ function parseBlocks(lines, endsWithNL, ctx) {
           line.toLowerCase().indexOf(html.endTag, html.first + 1) >= 0
         ) {
           // Types 1-5 keep the trailing newline when a non-blank line
-          // follows the end-tag line.
+          // follows the end-tag line (a tab-only line counts).
           hb.trailingNL =
-            li + 1 < lines.length && !blankFrom(lines[li + 1], 0);
+            li + 1 < lines.length && !blankSpacesOnly(lines[li + 1]);
           finalizeBlock(hb);
         }
         consumed = true;
