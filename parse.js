@@ -1582,8 +1582,13 @@ function parseInline(src, ctx) {
           node.s = src.slice(i, tag.end);
           appendNode(list, node);
           if (tag.tag === 'a') {
+            // Marked's inLink quirk: an inline <a sets it only when
+            // a whitespace follows the `a` (`<a >`, `<a href=..>`,
+            // `<a />` set it; bare `<a>` and `<a/>` do not).
             if (tag.closing) ctx.inLink = false;
-            else if (!tag.selfClose) ctx.inLink = true;
+            else if (tag.end - i > 2 && isSpaceCh(src[i + 2])) {
+              ctx.inLink = true;
+            }
           }
           i = tag.end;
           textStart = i;
