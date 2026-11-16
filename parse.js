@@ -986,6 +986,30 @@ function processEmphasis(delimiters) {
             opener = openerPrev;
             continue;
           }
+          // A shorter closer must not steal delimiters from a longer
+          // opener when a longer closer exists later that could match
+          // it whole (e.g. `**a b* c**` forms strong, the inner *
+          // stays literal).
+          if (current.len < opener.len) {
+            let later = current.dnext;
+            let longerLater = false;
+            while (later) {
+              if (
+                later.c === current.c &&
+                later.canClose &&
+                later.len >= opener.len &&
+                later.par === current.par
+              ) {
+                longerLater = true;
+                break;
+              }
+              later = later.dnext;
+            }
+            if (longerLater) {
+              opener = openerPrev;
+              continue;
+            }
+          }
           const use = opener.len >= 2 && current.len >= 2 ? 2 : 1;
           const tag = current.c === '~' ? 7 : use === 2 ? 6 : 5;
           const em = mkNode(tag);
