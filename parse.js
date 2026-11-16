@@ -1296,6 +1296,10 @@ function parseInline(src, ctx) {
   // Whether any link with unmatched backtick runs formed earlier in
   // this paragraph (on any line).
   let sawBtLink = false;
+  // Unmatched backtick runs on the current line (reset at each
+  // newline).
+  let lineBtRuns = 0;
+  let lineBtAt = 0;
 
   const flushText = (end) => {
     if (end > textStart) {
@@ -1403,6 +1407,23 @@ function parseInline(src, ctx) {
         // runs.
         for (const br of brackets) {
           if (br.active) br.btRuns = (br.btRuns || 0) + 1;
+        }
+        // Two unmatched runs on one line, after a backtick-link
+        // formed earlier in the paragraph, suppress emphasis on
+        // that line (doc-35): disable delimiters already scanned.
+        const lineStart = src.lastIndexOf('\n', i) + 1;
+        if (lineStart !== lineBtAt) {
+          lineBtAt = lineStart;
+          lineBtRuns = 0;
+        }
+        lineBtRuns++;
+        if (sawBtLink && lineBtRuns === 2) {
+          for (const d of delimiters) {
+            if (d.pos >= lineStart) {
+              d.canOpen = false;
+              d.canClose = false;
+            }
+          }
         }
         i = j;
       }
