@@ -2875,8 +2875,15 @@ function parseBlocks(lines, endsWithNL, ctx) {
           finalizeBlock(tip);
           // Fall through: the line is parsed as a fresh block.
         } else if (!padOk) {
-          // Under-indented: look ahead for a closing fence. If one
-          // exists before any top-level block start, keep consuming.
+          // Under-indented: if the code block has no content yet,
+          // it ends immediately (empty) — the lookahead only saves
+          // a block that already has lines.
+          if (tip.lines.length === 0) {
+            finalizeBlock(tip);
+            // Fall through: the line is parsed as a fresh block.
+          } else {
+            // Look ahead for a closing fence. If one exists before
+            // any top-level block start, keep consuming.
           let hasFence = false;
           for (let k = li + 1; k < lines.length && k < li + 100; k++) {
             const lk = lines[k];
@@ -2918,11 +2925,13 @@ function parseBlocks(lines, endsWithNL, ctx) {
             finalizeBlock(tip);
             continue;
           } else {
+            const strip = tip.fenceCh === "~" ? 0 : tip.fenceIndent;
             tip.lines.push({
-              s: contentAfter(line, offset, col, spaces, tip.fenceCh === "~" ? 0 : tip.fenceIndent, true, tabBase, true),
+              s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true),
               term: terminated,
             });
             continue;
+          }
           }
         } else if (
           isClosingFence(line, offset, col, spaces, tip.fenceCh, tip.fenceLen)
@@ -2931,8 +2940,9 @@ function parseBlocks(lines, endsWithNL, ctx) {
           finalizeBlock(tip);
           continue;
         } else {
+          const strip = tip.fenceCh === "~" ? 0 : tip.fenceIndent;
           tip.lines.push({
-            s: contentAfter(line, offset, col, spaces, tip.fenceCh === "~" ? 0 : tip.fenceIndent, true, tabBase, true),
+            s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true),
             term: terminated,
           });
           continue;
@@ -2946,8 +2956,9 @@ function parseBlocks(lines, endsWithNL, ctx) {
         leaf.closed = true;
         finalizeBlock(leaf);
       } else {
+        const strip = leaf.fenceCh === "~" ? 0 : leaf.fenceIndent;
         leaf.lines.push({
-          s: contentAfter(line, offset, col, spaces, leaf.fenceCh === "~" ? 0 : leaf.fenceIndent, true, tabBase, true),
+          s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true),
           term: terminated,
         });
       }
