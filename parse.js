@@ -3019,19 +3019,9 @@ function parseBlocks(lines, endsWithNL, ctx) {
         if (tip.t === 'para' && tip.lines.length >= 2) {
           const aligns = parseDelimRow(tip.lines[1]);
           const header = splitTableRow(tip.lines[0]);
-          // A tab line is an empty table row — unless the line after
-          // the next line is a setext underline (then the tab ends
-          // the table, and the next line starts a new paragraph that
-          // the underline turns into a heading).
           if (aligns && aligns.length === header.length) {
-            const afterNext =
-              li + 2 < lines.length ? lines[li + 2] : '';
-            const isSetext =
-              /^=+\s*$/.test(afterNext) || /^-+\s*$/.test(afterNext);
-            if (!isSetext) {
-              tip.lines.push('');
-              continue;
-            }
+            tip.lines.push('');
+            continue;
           }
         }
       }
@@ -3170,7 +3160,16 @@ function parseBlocks(lines, endsWithNL, ctx) {
       }
       if (paraBlocks) {
         const sx = matchSetext(line, offset, col, spaces);
-        if (sx && stripLinkDefs(openPara, ctx.refs) !== null) {
+        // A paragraph whose first two lines form a table header +
+        // delimiter is a table, not a setext heading: the underline
+        // line becomes another table row.
+        let isTablePara = false;
+        if (sx && openPara.lines.length >= 2) {
+          const aligns = parseDelimRow(openPara.lines[1]);
+          const header = splitTableRow(openPara.lines[0]);
+          isTablePara = !!(aligns && aligns.length === header.length);
+        }
+        if (sx && !isTablePara && stripLinkDefs(openPara, ctx.refs) !== null) {
           openPara.t = 'head';
           openPara.level = sx;
           finalizeBlock(openPara);
