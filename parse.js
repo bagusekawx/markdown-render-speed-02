@@ -1313,7 +1313,10 @@ function parseInline(src, ctx) {
         }
         if (innerRuns % 2 === 1) {
           for (const br of brackets) {
-            if (br.active) br.poisoned = true;
+            if (br.active) {
+              br.poisoned = true;
+              br.poisonEnd = close + runLen;
+            }
           }
         }
         let content = src.slice(j, close);
@@ -1444,9 +1447,15 @@ function parseInline(src, ctx) {
       const br = brackets[bIdx];
       // A bracket whose text holds an odd number of unmatched
       // backtick runs, or that was poisoned by an odd-inner-backtick
-      // code span followed by an emphasis delimiter, can never form
-      // a link or image: deactivate it and treat ] as literal.
-      if ((br.btRuns || 0) % 2 === 1 || br.emAfterPoison) {
+      // code span not immediately followed by this ] (any character
+      // — even a space — between the span and ] blocks the link),
+      // can never form a link or image: deactivate it and treat ]
+      // as literal.
+      if (
+        (br.btRuns || 0) % 2 === 1 ||
+        br.emAfterPoison ||
+        (br.poisoned && i !== br.poisonEnd)
+      ) {
         br.active = false;
         i++;
         continue;
@@ -2825,7 +2834,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
             continue;
           } else {
             tip.lines.push({
-              s: contentAfter(line, offset, col, spaces, tip.fenceIndent, true, tabBase, true),
+              s: contentAfter(line, offset, col, spaces, tip.fenceCh === "~" ? 0 : tip.fenceIndent, true, tabBase, true),
               term: terminated,
             });
             continue;
@@ -2838,7 +2847,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
           continue;
         } else {
           tip.lines.push({
-            s: contentAfter(line, offset, col, spaces, tip.fenceIndent, true, tabBase, true),
+            s: contentAfter(line, offset, col, spaces, tip.fenceCh === "~" ? 0 : tip.fenceIndent, true, tabBase, true),
             term: terminated,
           });
           continue;
@@ -2853,7 +2862,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         finalizeBlock(leaf);
       } else {
         leaf.lines.push({
-          s: contentAfter(line, offset, col, spaces, leaf.fenceIndent, true, tabBase, true),
+          s: contentAfter(line, offset, col, spaces, leaf.fenceCh === "~" ? 0 : leaf.fenceIndent, true, tabBase, true),
           term: terminated,
         });
       }
