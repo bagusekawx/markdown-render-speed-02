@@ -366,6 +366,69 @@ function labelBalanced(s, start, end) {
   return depth === 0;
 }
 
+// Is the source range [start, end) a valid inline/full-reference link
+// label (marked's label pattern)? At the top level, backticks must form a
+// code-span-like pair (`+[^`]*?`+, mismatched run lengths allowed) or a
+// run of 2+ backticks immediately before the closing ]; a lone backtick
+// rejects the label. Inside nested brackets backticks are ordinary, and
+// brackets nest at most 2 deep within the label.
+function labelValid(s, start, end) {
+  function pair(j, d) {
+    j++;
+    while (j < end) {
+      const c = s.charCodeAt(j);
+      if (c === 92 && j + 1 < end) { j += 2; continue; }
+      if (c === 91) {
+        if (d >= 2) return -1;
+        const k = pair(j, d + 1);
+        if (k === -1) return -1;
+        j = k;
+        continue;
+      }
+      if (c === 93) return j + 1;
+      j++;
+    }
+    return -1;
+  }
+  let j = start;
+  while (j < end) {
+    const c = s.charCodeAt(j);
+    if (c === 92) {
+      if (j + 1 >= end) return false;
+      j += 2;
+      continue;
+    }
+    if (c === 91) {
+      const k = pair(j, 1);
+      if (k === -1) return false;
+      j = k;
+      continue;
+    }
+    if (c === 93) return false;
+    if (c === 96) {
+      let run = 0;
+      while (j + run < end && s.charCodeAt(j + run) === 96) run++;
+      if (run >= 2 && j + run === end) { j = end; break; }
+      let k = j + run;
+      let closed = -1;
+      while (k < end) {
+        if (s.charCodeAt(k) === 96) {
+          let r2 = 0;
+          while (k + r2 < end && s.charCodeAt(k + r2) === 96) r2++;
+          closed = k + r2;
+          break;
+        }
+        k++;
+      }
+      if (closed === -1) return false;
+      j = closed;
+      continue;
+    }
+    j++;
+  }
+  return true;
+}
+
 // Parse a link label "[...]" starting at s[i] === '['. Returns { label, next }
 // (label is the raw text between the brackets) or null.
 function parseLinkLabel(s, i) {
@@ -950,7 +1013,7 @@ function scanInline(src, refs) {
         for (let bj = 0; bj < brackets.length; bj++) {
           const b = brackets[bj];
           if (!b.active) continue;
-          if (labelBalanced(src, b.start, i)) return { b, bj };
+          if (labelValid(src, b.start, i)) return { b, bj };
         }
         return null;
       };
