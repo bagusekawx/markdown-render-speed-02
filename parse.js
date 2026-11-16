@@ -643,6 +643,23 @@ function parseInline(src, refs) {
     return { end: j + 1, href: 'mailto:' + cleanUrlRaw(email), text: escapeHtml(email), raw: email };
   }
 
+  // Is there an unmatched '_' emphasis opener in the current container?
+  // Used by the email-domain matcher: a trailing '_' run after an email
+  // is an emphasis closer (not domain content) when an opener is still
+  // unmatched. Compared by total delimiter length: an opener fully
+  // consumed by an earlier closer ("_a_ b an@x.com_") leaves nothing
+  // unmatched, while a partially consumed one ("__a_ b an@x.com_") does.
+  function hasOpenUnderscoreDelim() {
+    let openLen = 0, closeLen = 0;
+    for (let d = 0; d < delims.length; d++) {
+      const dl = delims[d];
+      if (dl.ch !== 95 || dl.n.p !== root) continue;
+      if (dl.open) openLen += dl.len;
+      if (dl.close) closeLen += dl.len;
+    }
+    return openLen > closeLen;
+  }
+
   // ---- GFM extended autolinks (www. / scheme:// / email) ----
   // Valid domain per GFM: labels of [a-zA-Z0-9_-] separated by '.', each label
   // not starting/ending with '-', containing at least one '.', last label has a letter.
@@ -662,8 +679,26 @@ function parseInline(src, refs) {
         else break;
       }
       if (j === ls) break;
-      // label must not start or end with '-'
-      if (src.charCodeAt(ls) === 45 || src.charCodeAt(j - 1) === 45) return -1;
+      // URL mode: a label must not start or end with '-'.
+      if (forUrl) {
+        if (src.charCodeAt(ls) === 45 || src.charCodeAt(j - 1) === 45) return -1;
+      } else if (src.charCodeAt(j - 1) === 95) {
+        // Email mode: a label ending with '_' breaks the domain chain
+        // (marked's domain match backtracks past it). A mid label
+        // (followed by '.' + label char) truncates the domain to the
+        // previous label ("an@a.b_.c" does not link); a last label is
+        // decided in the tail below (emphasis closer or backtrack).
+        if (src.charCodeAt(j) === 46) {
+          const nc = src.charCodeAt(j + 1);
+          if ((nc >= 48 && nc <= 57) || (nc >= 65 && nc <= 90) || (nc >= 97 && nc <= 122) || nc === 95 || nc === 45) {
+            if (lastDot === -1) return -1;
+            j = lastDot;
+            break;
+          }
+        }
+        labels++;
+        break;
+      }
       if (!hasAlnum) return -1;
       labels++;
       if (src.charCodeAt(j) === 46) {
@@ -679,11 +714,40 @@ function parseInline(src, refs) {
       break;
     }
     // trailing '_' or '-' is not part of a URL domain (it is usually an
-    // emphasis delimiter: "https://x.com__" links "x.com"). For email
-    // domains there is no path after, so a trailing '_' invalidates the
-    // whole email ("a.b-c_d@a.b_" does not link at all).
+    // emphasis delimiter: "https://x.com__" links "x.com").
     if (forUrl) {
       while (j > pos && (src.charCodeAt(j - 1) === 95 || src.charCodeAt(j - 1) === 45)) j--;
+    } else {
+      // Email mode: the domain must end with an alphanumeric. A last
+      // label ending with '_' or '-' backtracks label by label
+      // ("an@q.example.com_" links "an@q.example"; "a@b.co-" does not
+      // link). Exception: a trailing '_' run that closes an open '_'
+      // emphasis delimiter ends the domain right before the run — marked
+      // tokenizes the emphasis first, so the closer never pollutes the
+      // domain ("__a@b.co__" links "a@b.co").
+      lastDot = -1;
+      for (let k = pos; k < j; k++) if (src.charCodeAt(k) === 46) lastDot = k;
+      for (;;) {
+        if (j <= pos) return -1;
+        const lastC = src.charCodeAt(j - 1);
+        if ((lastC >= 48 && lastC <= 57) || (lastC >= 65 && lastC <= 90) || (lastC >= 97 && lastC <= 122)) break;
+        if (lastC === 95) {
+          let runStart = j;
+          while (runStart > pos && src.charCodeAt(runStart - 1) === 95) runStart--;
+          // the run must sit inside the last label (after its dot) and
+          // not be followed by '.' (a '.' would continue the domain)
+          if (runStart > lastDot + 1 && src.charCodeAt(j) !== 46 && hasOpenUnderscoreDelim()) {
+            j = runStart;
+            break;
+          }
+        }
+        // backtrack: drop the last label
+        if (labels < 2 || lastDot === -1) return -1;
+        j = lastDot;
+        labels--;
+        lastDot = -1;
+        for (let k = pos; k < j; k++) if (src.charCodeAt(k) === 46) lastDot = k;
+      }
     }
     if (labels < 2 || lastDot === -1) return -1;
     // last label must contain a letter and end with an alphanumeric
@@ -705,6 +769,7 @@ function parseInline(src, refs) {
   function matchAutolinkPath(pos, urlStart) {
     let j = pos;
     let parenDepth = 0;
+    let firstUnmatchedOpen = -1; // position of the '(' opening the outermost unclosed group
     // a ']' ends the path when it closes an active [ ... ] region and is
     // followed by a link suffix — unless the autolink sits inside a link
     // destination "(...)" (preceded by "]("): then the ']' is URL content
@@ -718,16 +783,23 @@ function parseInline(src, refs) {
       if (c === 32 || c === 9 || c === 10 || c === 60) break;
       if (c === 93) {
         // ']' closes an active [ ... ] region: stop before it so the link
-        // can form. Inside a (...) group the ']' is URL content but still
-        // ends the path ("(https://x)]" links "https://x)]", not more).
+        // can form. Otherwise it is ordinary path content
+        // ("](https://x)](y)" links the whole "https://x)](y)").
         if (inBrackets && (src.charCodeAt(j + 1) === 40 || src.charCodeAt(j + 1) === 91)) break;
-        if (inParens) { j++; break; }
       }
-      if (c === 40) { parenDepth++; j++; continue; }
+      if (c === 40) {
+        if (parenDepth === 0) firstUnmatchedOpen = j;
+        parenDepth++;
+        j++;
+        continue;
+      }
       if (c === 41) {
         // an unbalanced ')' in the middle of the path is content (it only
         // matters at the end, where it is trimmed below)
-        if (parenDepth > 0) parenDepth--;
+        if (parenDepth > 0) {
+          parenDepth--;
+          if (parenDepth === 0) firstUnmatchedOpen = -1;
+        }
         j++;
         continue;
       }
@@ -737,7 +809,11 @@ function parseInline(src, refs) {
     // autolink before the '&' — check this BEFORE trimming ';' as
     // punctuation ("www.google.com/search?q=commonmark&hl;" links only
     // up to "commonmark")
+    // an unmatched '(' is not part of the URL: cut the path at the first
+    // one ("](https://x)](https://y (t))" links only "https://x)]" — the
+    // '(' before the second URL has no ')' before the space)
     let end = j;
+    if (parenDepth > 0 && firstUnmatchedOpen !== -1) end = firstUnmatchedOpen;
     if (end > pos && src.charCodeAt(end - 1) === 59) {
       let k = end - 2;
       while (k >= pos && ((src.charCodeAt(k) >= 48 && src.charCodeAt(k) <= 57) || (src.charCodeAt(k) >= 65 && src.charCodeAt(k) <= 90) || (src.charCodeAt(k) >= 97 && src.charCodeAt(k) <= 122))) k--;
@@ -752,15 +828,15 @@ function parseInline(src, refs) {
         if (c === 63 || c === 33 || c === 46 || c === 44 || c === 58 || c === 42 || c === 95 || c === 126 || c === 59) { end--; changed = true; }
         else break;
       }
-      // trim a trailing ')' only if it has no matching '(' before it
-      // (scan the depth up to that ')', not the total depth: the first ')'
-      // in "a)b(c)" is unbalanced but the last one is matched)
+      // trim a trailing ')' only if it has no matching '(' before it:
+      // match parens with a stack — an unmatched ')' in the middle
+      // ("a)b(c)") does not consume the '(' that matches the last one
       while (end > pos && src.charCodeAt(end - 1) === 41) {
         let depth = 0;
         for (let k = pos; k < end - 1; k++) {
           const c = src.charCodeAt(k);
           if (c === 40) depth++;
-          else if (c === 41) depth--;
+          else if (c === 41 && depth > 0) depth--;
         }
         if (depth <= 0) { end--; changed = true; }
         else break;
