@@ -2053,6 +2053,39 @@ function parseBlocks(lines, srcEndsNL) {
     return m.length > 0;
   }
 
+  // After a '>' has been consumed, expand the whitespace run that follows
+  // it with tab stops counted from the marker's width in the stripped text
+  // (the spaces skipped before it plus the marker itself), consume one
+  // column of it with the marker, and rebase the cursor to column 0 of the
+  // stripped text. `skipped` is the number of columns before the marker.
+  // The cursor must be right after '>' with cur.tab === 0.
+  function consumeQuoteSpace(skipped) {
+    const base = skipped + 1;
+    let j = cur.i;
+    let col = base;
+    let width = 0;
+    let hasTab = false;
+    while (j < cur.s.length) {
+      const c = cur.s.charCodeAt(j);
+      if (c === 32) { width++; col++; j++; }
+      else if (c === 9) { const w = 4 - (col % 4); width += w; col += w; j++; hasTab = true; }
+      else break;
+    }
+    if (hasTab && width > 0) {
+      const remain = width - 1;
+      if (remain > 0) {
+        cur.i = j - 1; // last whitespace char; curRest expands cur.tab after it
+        cur.tab = remain;
+      } else {
+        cur.i = j;
+        cur.tab = 0;
+      }
+    } else if (width > 0) {
+      cur.i++;
+    }
+    cur.col = 0;
+  }
+
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li];
     cur.s = line;
@@ -2081,8 +2114,16 @@ function parseBlocks(lines, srcEndsNL) {
         while (skipped < 3 && curChar(cur) === 32) { curAdvance1(cur); skipped++; }
         if (curChar(cur) === 62) { // >
           curAdvance1(cur);
-          // One optional space or tab after the marker.
-          if (curChar(cur) === 32 || curChar(cur) === 9) curAdvance1(cur);
+          // The whitespace after the marker is tab-expanded with tab stops
+          // counted from the marker's width in the stripped text, then one
+          // column of it is consumed with the marker. Expanding from the
+          // original column instead double-counts in nested quotes.
+          if (cur.tab === 0) {
+            consumeQuoteSpace(skipped);
+          } else {
+            // A partially consumed tab from an outer level: one column, as before.
+            if (curChar(cur) === 32 || curChar(cur) === 9) curAdvance1(cur);
+          }
           ok = true;
         }
         if (ok) {
@@ -2917,7 +2958,7 @@ function parseBlocks(lines, srcEndsNL) {
       cur.col = peek.col;
       cur.tab = peek.tab;
       curAdvance1(cur); // the '>'
-      if (curChar(cur) === 32 || curChar(cur) === 9) curAdvance1(cur);
+      consumeQuoteSpace(peek.indent);
       if (curRestBlank(cur)) {
         // An empty quote line: the quote stays open with no content.
         return;
