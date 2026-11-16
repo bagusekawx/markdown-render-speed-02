@@ -1053,7 +1053,7 @@ function processEmphasis(delimiters) {
           // strong, neither is an em whose closer is the same run
           // that closed the strong (`***`), nor one closed by a
           // run of 3+ (`*a **b**c***` forms em).
-          if (use === 1 && tag === 5 && current.c === '*' && current.len === 1) {
+          if (use === 1 && tag === 5 && current.c === '*' && current.len <= 2) {
             let blocked = false;
             let node = opener.n;
             while (node && node !== current) {
