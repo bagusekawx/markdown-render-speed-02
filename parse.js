@@ -2742,8 +2742,14 @@ function parseBlocks(lines, endsWithNL, ctx) {
           for (let k = li + 1; k < lines.length && k < li + 100; k++) {
             const lk = lines[k];
             if (blankFrom(lk, 0)) continue;
+            // A closing fence is judged relative to the list item's
+            // content pad (a 4-space fence inside a 2-space item
+            // counts as indented 2).
+            const indK0 = indentFrom(lk, 0, 0, 0);
+            const relIndent = indK0.indent - (brokeAtPad > 0 ? brokeAtPad : 0);
             if (
-              isClosingFence(lk, 0, 0, 0, tip.fenceCh, tip.fenceLen)
+              relIndent >= 0 && relIndent <= 3 &&
+              isClosingFence(lk, indK0.offset, indK0.col, indK0.spaces, tip.fenceCh, tip.fenceLen)
             ) {
               hasFence = true;
               break;
