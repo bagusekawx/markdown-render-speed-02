@@ -1134,6 +1134,22 @@ function parseInline(src, refs) {
       if (href === null) {
         // not a link: deactivate this opener, ']' is literal
         opener.active = false;
+        // marked quirk: if the failed link text contains a code span with
+        // a backtick inside, emphasis delimiters inside the "[...]" are
+        // also suppressed ("[at _node `` a ` b ``_](<... b>)" keeps the
+        // "_" literal, but "at _node `` a ` b ``_ end" forms <em>)
+        const kids = root.ch;
+        const oi = kids.indexOf(opener.n);
+        let hasBt = false;
+        for (let q = oi + 1; q < kids.length; q++) {
+          if (kids[q].t === 4 && kids[q].s.indexOf('`') !== -1) { hasBt = true; break; }
+        }
+        if (hasBt) {
+          for (const d of delims) {
+            const di = kids.indexOf(d.n);
+            if (di > oi) { d.open = false; d.close = false; }
+          }
+        }
         buf += ']';
         i++;
         continue;
@@ -2240,7 +2256,11 @@ function parseBlocks(lines, start, end, refs, lazy, spaceLines, inListItem) {
             if (m >= l.length) { j++; break; }
           }
         }
-        content.push(stripIndentStr(l, fence.indent, true));
+        // marked quirk: the fence's indent is stripped from content lines
+        // only for BACKTICK fences ("   ```ts\n   foo" -> "foo"); TILDE
+        // fences keep the indent ("   ~~~ts\n   foo" -> "   foo")
+        if (fence.ch === 96) content.push(stripIndentStr(l, fence.indent, true));
+        else content.push(l);
         j++;
       }
       // exactly one trailing EMPTY line is dropped (a line of only spaces
