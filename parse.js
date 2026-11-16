@@ -2923,9 +2923,19 @@ function parseBlocks(lines, endsWithNL, ctx) {
         if (tip.t === 'para' && tip.lines.length >= 2) {
           const aligns = parseDelimRow(tip.lines[1]);
           const header = splitTableRow(tip.lines[0]);
+          // A tab line is an empty table row — unless the line after
+          // the next line is a setext underline (then the tab ends
+          // the table, and the next line starts a new paragraph that
+          // the underline turns into a heading).
           if (aligns && aligns.length === header.length) {
-            tip.lines.push('');
-            continue;
+            const afterNext =
+              li + 2 < lines.length ? lines[li + 2] : '';
+            const isSetext =
+              /^=+\s*$/.test(afterNext) || /^-+\s*$/.test(afterNext);
+            if (!isSetext) {
+              tip.lines.push('');
+              continue;
+            }
           }
         }
       }
