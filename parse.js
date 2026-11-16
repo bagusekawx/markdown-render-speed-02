@@ -980,7 +980,9 @@ function processEmphasis(delimiters) {
       let opener = current.dprev;
       while (opener) {
         const openerPrev = opener.dprev;
-        if (opener.c === current.c && opener.canOpen) {
+        // An opener inside a different container (a link, or emphasis
+        // formed earlier) than the closer cannot match it.
+        if (opener.c === current.c && opener.canOpen && opener.par === current.par) {
           // Odd-match rule.
           if (
             (opener.canClose || current.canOpen) &&
