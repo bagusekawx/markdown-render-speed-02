@@ -1793,6 +1793,7 @@ function mkBlock(t, parent) {
     fenceIndent: 0,
     htmlType: 0,
     endTag: null,
+    trailingNL: false,
     ordered: false,
     start: 1,
     delim: '',
@@ -2526,6 +2527,8 @@ function parseBlocks(lines, endsWithNL, ctx) {
         });
         if (leaf.htmlType <= 5 && leaf.endTag) {
           if (line.toLowerCase().indexOf(leaf.endTag) >= 0) {
+            leaf.trailingNL =
+              li + 1 < lines.length && !blankFrom(lines[li + 1], 0);
             finalizeBlock(leaf);
           }
         }
@@ -2628,6 +2631,10 @@ function parseBlocks(lines, endsWithNL, ctx) {
           html.endTag &&
           line.toLowerCase().indexOf(html.endTag, html.first + 1) >= 0
         ) {
+          // Types 1-5 keep the trailing newline when a non-blank line
+          // follows the end-tag line.
+          hb.trailingNL =
+            li + 1 < lines.length && !blankFrom(lines[li + 1], 0);
           finalizeBlock(hb);
         }
         consumed = true;
@@ -2779,6 +2786,21 @@ function renderBlock(b, ctx, out, inTightList) {
   switch (b.t) {
     case 'doc':
       for (const c of b.ch) renderBlock(c, ctx, out, false);
+      // An HTML block as the last top-level block keeps its trailing
+      // newline (if its last line was terminated); otherwise an HTML
+      // block's last line gets no '\n' and the next block follows
+      // immediately.
+      if (b.ch.length > 0) {
+        const last = b.ch[b.ch.length - 1];
+        if (
+          last.t === 'html' &&
+          !last.trailingNL &&
+          last.lines.length > 0 &&
+          last.lines[last.lines.length - 1].term
+        ) {
+          out.push('\n');
+        }
+      }
       break;
     case 'para': {
       if (b.text === null) break;
@@ -2818,10 +2840,14 @@ function renderBlock(b, ctx, out, inTightList) {
       break;
     }
     case 'html': {
-      for (const l of b.lines) {
-        out.push(l.s);
-        if (l.term) out.push('\n');
+      // Lines are joined with '\n'; the block's last line gets a '\n'
+      // only for types 1-5 followed by a non-blank line (the doc case
+      // adds it back for a last top-level block without trailingNL).
+      for (let i = 0; i < b.lines.length; i++) {
+        out.push(b.lines[i].s);
+        if (i < b.lines.length - 1 && b.lines[i].term) out.push('\n');
       }
+      if (b.trailingNL) out.push('\n');
       break;
     }
     case 'hr':
