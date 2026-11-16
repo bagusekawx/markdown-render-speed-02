@@ -1258,6 +1258,9 @@ function parseInline(src, ctx) {
   const n = src.length;
   let i = 0;
   let textStart = 0;
+  // Once a link forms whose text held unmatched backtick runs, no
+  // emphasis may form later on the SAME line (marked quirk).
+  let noEmphasisUntil = -1;
 
   const flushText = (end) => {
     if (end > textStart) {
@@ -1286,6 +1289,18 @@ function parseInline(src, ctx) {
       if (brackets.some(b => b.active)) {
         const nl = src.indexOf('\n', j);
         if (nl >= 0) searchEnd = nl;
+        // If the innermost bracket already holds an unmatched
+        // backtick run, a new code span must not cross its ]:
+        // the ] stays a bracket close and the link can still form.
+        for (let bi = brackets.length - 1; bi >= 0; bi--) {
+          if (brackets[bi].active) {
+            if ((brackets[bi].btRuns || 0) > 0) {
+              const br = src.indexOf(']', j);
+              if (br >= 0 && br < searchEnd) searchEnd = br;
+            }
+            break;
+          }
+        }
       }
       while (k < searchEnd) {
         const b = src.indexOf('`', k);
@@ -1352,6 +1367,11 @@ function parseInline(src, ctx) {
       let j = i;
       while (j < n && src.charCodeAt(j) === c) j++;
       const runLen = j - i;
+      if (noEmphasisUntil >= 0 && i < noEmphasisUntil) {
+        // Emphasis suppressed until the end of this line.
+        i = j;
+        continue;
+      }
       if (c === 126 && runLen >= 3) {
         // Runs of 3+ tildes never form strikethrough (GFM): they stay
         // literal text. (flushText already ran; the run is re-included
@@ -1549,6 +1569,10 @@ function parseInline(src, ctx) {
         continue;
       }
       // Form the link or image.
+      if ((br.btRuns || 0) > 0) {
+        const nl = src.indexOf('\n', linkEnd);
+        noEmphasisUntil = nl >= 0 ? nl : n;
+      }
       const node = mkNode(br.isImage ? 9 : 8);
       node.href = cleanUrl(dest);
       node.title = title ? cleanAttr(title) : null;
