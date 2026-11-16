@@ -1848,18 +1848,37 @@ function indentFrom(line, offset, col, spaces) {
   return { indent: ind, offset: o, col: c, spaces: 0 };
 }
 
-function contentAfter(line, offset, col, spaces, n, expandTab) {
+function contentAfter(line, offset, col, spaces, n, expandTab, tabBase) {
   const a = advCols(line, offset, col, spaces, n);
   let s = (a.spaces ? ' '.repeat(a.spaces) : '') + line.slice(a.offset);
-  // In code content, if any indentation was stripped and the content
-  // starts with a tab, the tab expands to spaces based on the column
-  // (a tab at the start of an unstripped line is kept verbatim).
-  if (
-    expandTab &&
-    s.charCodeAt(0) === 9 &&
-    (n > 0 || offset > 0 || col > 0)
-  ) {
-    s = ' '.repeat(4 - (a.col % 4)) + s.slice(1);
+  // In code content (and quote/list paragraph content), if any
+  // indentation was stripped and the leading whitespace contains a
+  // tab, the tab expands to spaces based on its column in the
+  // innermost container's frame (a tab at the start of an unstripped
+  // top-level line is kept verbatim).
+  if (expandTab && (n > 0 || offset > 0 || col > 0)) {
+    const base = (tabBase || 0);
+    let k = 0;
+    let c = a.col - base;
+    let out = '';
+    let changed = false;
+    while (k < s.length) {
+      const ch = s.charCodeAt(k);
+      if (ch === 32) {
+        out += ' ';
+        c++;
+        k++;
+      } else if (ch === 9) {
+        const w = 4 - (c % 4);
+        out += ' '.repeat(w);
+        c += w;
+        k++;
+        changed = true;
+      } else {
+        break;
+      }
+    }
+    if (changed) s = out + s.slice(k);
   }
   return s;
 }
@@ -2538,6 +2557,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
     let offset = 0;
     let col = 0;
     let spaces = 0;
+    let tabBase = 0;
     let container = root;
     let leaf = null;
     let matchedContainer = false;
@@ -2556,6 +2576,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         offset = m.offset;
         col = m.col;
         spaces = m.spaces;
+        tabBase = col - 2;
         container = last;
         matchedContainer = true;
       } else if (last.t === 'item') {
@@ -2597,7 +2618,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
           finalizeBlock(tip);
         } else {
           tip.lines.push({
-            s: contentAfter(line, offset, col, spaces, tip.fenceIndent, true),
+            s: contentAfter(line, offset, col, spaces, tip.fenceIndent, true, tabBase),
             term: terminated,
           });
         }
@@ -2612,7 +2633,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         finalizeBlock(leaf);
       } else {
         leaf.lines.push({
-          s: contentAfter(line, offset, col, spaces, leaf.fenceIndent, true),
+          s: contentAfter(line, offset, col, spaces, leaf.fenceIndent, true, tabBase),
           term: terminated,
         });
       }
@@ -2910,7 +2931,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
       const ind = indentFrom(line, offset, col, spaces);
       content = line.slice(ind.offset);
     } else {
-      content = contentAfter(line, offset, col, spaces, 0);
+      content = contentAfter(line, offset, col, spaces, 0, true, tabBase);
     }
     if (openPara) {
       openPara.lines.push(content);
