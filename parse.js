@@ -21,6 +21,8 @@ for (const c of '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~') ASCII_PUNCT[c.charCodeAt(0
 const PUNCT_RE = /[\p{P}\p{S}]/u; // Unicode punctuation + symbols, non-ASCII only (the spec counts symbols as punctuation for emphasis flanking: $, £, €)
 const ZS_RE = /\p{Zs}/u; // Unicode space separators, for non-ASCII chars only
 const ALNUM_RE = /[\p{L}\p{N}]/u; // Unicode letters + numbers, for the '_' intra-word rule
+const NEEDS_ESCAPE = /[&<>"']/; // fast path for escText/escAll: most text has none of these
+const EMPTY_SPANS = []; // shared empty span list (never mutated) for the mask guards
 
 function isSpace(ch) {
   // CommonMark "Unicode whitespace": space, tab, LF, FF, CR + Zs category.
@@ -74,6 +76,7 @@ function unescapePunct(s) {
 // or &word; (ASCII word chars). Named entities are never validated or decoded;
 // they pass through untouched.
 function escText(s) {
+  if (!NEEDS_ESCAPE.test(s)) return s;
   let out = '';
   let start = 0;
   for (let i = 0; i < s.length; i++) {
@@ -118,6 +121,7 @@ function escText(s) {
 
 // marked's escape(x, true): every & < > " ' is escaped (code spans and code blocks).
 function escAll(s) {
+  if (!NEEDS_ESCAPE.test(s)) return s;
   let out = '';
   let start = 0;
   for (let i = 0; i < s.length; i++) {
@@ -170,7 +174,13 @@ function decodeNumericRef(s, i) {
 // marked's cleanUrl: encodeURI, then %25 back to % (so %20 stays %20),
 // and null when it throws (lone surrogate). A null href makes a
 // link/image/autolink render as its plain text.
+// encodeURI escapes only these (plus non-ASCII, which it percent-encodes,
+// and lone surrogates, which make it throw): a href with none of them
+// comes back unchanged. A % on its own is safe too: encodeURI turns it
+// into %25 and the restore below turns it straight back.
+const URL_NEEDS_ENCODE = /[^\x21-\x7E]|["<>`\\^|{}[\]]/;
 function cleanUrl(href) {
+  if (!URL_NEEDS_ENCODE.test(href)) return href;
   try {
     return encodeURI(href).replace(/%25/g, '%');
   } catch {
@@ -485,11 +495,11 @@ function step2Source(s) {
 // whole, so its label's delimiters never reach the emphasis resolver —
 // even when the link itself does not form (its label fails the link
 // regex, e.g. a code span with an inner backtick). The span is returned
-// in source coordinates (step 2 is length-preserving).
+// in source coordinates (step 2 is length-preserving). `codeSpans` is
+// the caller's maskCodeSpans result, reused to avoid a second scan.
 const BLOCK_SKIP_LINK = /\[(?:[^\[\]`]|(`+)[^`]+\1(?!`))*?\]\((?:\\[\s\S]|[^\\()]|\((?:\\[\s\S]|[^\\()])*\))*\)/g;
-function maskInlineLinks(s) {
+function maskInlineLinks(s, codeSpans) {
   const t = step2Source(s);
-  const codeSpans = maskCodeSpans(s);
   const spans = [];
   BLOCK_SKIP_LINK.lastIndex = 0;
   let m;
@@ -534,14 +544,10 @@ function parseLinkLabel(s, i) {
 // Is s[i] the start of an email local-part character (marked's set: the
 // CommonMark set without '/')?
 // Email local-part char per marked's GFM email regex: [A-Za-z0-9._+-].
+const EMAIL_LOCAL = new Uint8Array(128);
+for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-') EMAIL_LOCAL[c.charCodeAt(0)] = 1;
 function isEmailLocal(ch) {
-  if (ch < 128) {
-    return (
-      (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) ||
-      ch === 43 || ch === 45 || ch === 46 || ch === 95
-    );
-  }
-  return false;
+  return EMAIL_LOCAL[ch] === 1; // out of range (incl. NaN) reads undefined
 }
 
 function isDomainChar(ch) {
@@ -920,11 +926,15 @@ function matchAngleAutolink(s, i) {
 function scanInline(src, refs, doc) {
   const items = [];
   const brackets = []; // { idx, img, active, start, inLink }
-  let textBuf = '';
+  // Pending plain-text run: src[textStart..i), or -1 when there is none.
+  // (Slicing beats per-character += : the run is always a contiguous
+  // substring of src, since every append is src[i] or a slice from i.
+  // The hard-break trim below is the one exception, handled inline.)
+  let textStart = -1;
   const flushText = () => {
-    if (textBuf !== '') {
-      items.push(textBuf);
-      textBuf = '';
+    if (textStart !== -1) {
+      items.push(src.slice(textStart, i));
+      textStart = -1;
     }
   };
   // Push an escape or numeric-reference character as its own item (a token
@@ -944,7 +954,7 @@ function scanInline(src, refs, doc) {
   // code spans to '[...]', a hard break to a newline, a bare URL keeps its
   // last character). -1 when nothing precedes it.
   const prevCpForDelim = () => {
-    if (textBuf !== '') return cpBefore(textBuf, textBuf.length);
+    if (textStart !== -1) return cpBefore(src, i);
     if (items.length === 0) return -1;
     const it = items[items.length - 1];
     if (typeof it === 'string') return cpBefore(it, it.length);
@@ -1004,12 +1014,14 @@ function scanInline(src, refs, doc) {
   // Masking code spans for this paragraph: a delimiter inside one sees
   // the mask's characters ('[', 'a', ']') as its neighbours. Returns the
   // masked code point at `pos`, or -1 when `pos` is not inside a span.
-  const maskSpans = maskCodeSpans(src);
+  // (The indexOf guards skip the scans for paragraphs with no backticks
+  // or brackets at all — the common case for plain prose.)
+  const maskSpans = src.indexOf('`') === -1 ? EMPTY_SPANS : maskCodeSpans(src);
   // Inline links the emphasis mask hides whole (see maskInlineLinks):
   // a delimiter inside one never reaches the resolver, unless the link
   // actually forms (then the label is resolved on its own and the flag
   // is cleared on the label's items).
-  const linkSpans = maskInlineLinks(src);
+  const linkSpans = src.indexOf('[') === -1 ? EMPTY_SPANS : maskInlineLinks(src, maskSpans);
   const inLinkSpan = (pos) => {
     for (let m = 0; m < linkSpans.length; m++) {
       if (pos >= linkSpans[m].s && pos < linkSpans[m].e) return true;
@@ -1070,7 +1082,7 @@ function scanInline(src, refs, doc) {
           continue;
         }
       }
-      textBuf += '\\';
+      if (textStart === -1) textStart = i;
       i++;
       continue;
     }
@@ -1095,7 +1107,7 @@ function scanInline(src, refs, doc) {
         }
       }
       if (found === -1) {
-        textBuf += src.slice(i, i + run);
+        if (textStart === -1) textStart = i;
         i += run;
         continue;
       }
@@ -1109,7 +1121,7 @@ function scanInline(src, refs, doc) {
           if (src.charCodeAt(k) === 93 && linkWouldForm(k)) { swallow = true; break; }
         }
         if (swallow) {
-          textBuf += src.slice(i, i + run);
+          if (textStart === -1) textStart = i;
           i += run;
           continue;
         }
@@ -1260,7 +1272,7 @@ function scanInline(src, refs, doc) {
         tryShortcut();
       }
       if (link === null || br === null) {
-        textBuf += ']';
+        if (textStart === -1) textStart = i;
         i++;
         continue;
       }
@@ -1332,7 +1344,7 @@ function scanInline(src, refs, doc) {
         i = tag;
         continue;
       }
-      textBuf += '<';
+      if (textStart === -1) textStart = i;
       i++;
       continue;
     }
@@ -1347,31 +1359,31 @@ function scanInline(src, refs, doc) {
           continue;
         }
       }
-      textBuf += '&';
+      if (textStart === -1) textStart = i;
       i++;
       continue;
     }
 
     // Line ending: hard break after 2+ spaces/tabs, else a soft break.
     if (c === 10) {
-      let k = textBuf.length;
+      // Count trailing spaces/tabs in the pending text run.
       let spaces = 0;
-      while (k > 0) {
-        const tc = textBuf.charCodeAt(k - 1);
-        if (tc === 32 || tc === 9) {
+      let k = i;
+      if (textStart !== -1) {
+        while (k > textStart && (src.charCodeAt(k - 1) === 32 || src.charCodeAt(k - 1) === 9)) {
           spaces++;
           k--;
-        } else break;
+        }
       }
       if (spaces >= 2) {
-        textBuf = textBuf.slice(0, k);
-        flushText();
+        if (k > textStart) items.push(src.slice(textStart, k));
+        textStart = -1;
         items.push({ b: 1 });
         i++;
         // A hard break consumes the following spaces/tabs.
         while (i < n && (src.charCodeAt(i) === 32 || src.charCodeAt(i) === 9)) i++;
       } else {
-        textBuf += '\n';
+        if (textStart === -1) textStart = i;
         i++;
       }
       continue;
@@ -1398,17 +1410,23 @@ function scanInline(src, refs, doc) {
     }
 
     // GFM email autolink, tried at word starts (suppressed while inLink).
-    if (!doc.inLink && isEmailLocal(c) && (i === 0 || !isEmailLocal(src.charCodeAt(i - 1)))) {
-      const m = matchEmail(src, i);
-      if (m) {
-        flushText();
-        items.push({ g: 'mailto:' + m.email, t: m.email, s: i });
-        i = m.next;
-        continue;
+    // The local part is scanned inline first: matchEmail only runs when
+    // an @ actually follows it (the common case is a plain word).
+    if (!doc.inLink && EMAIL_LOCAL[c] === 1 && (i === 0 || EMAIL_LOCAL[src.charCodeAt(i - 1)] !== 1)) {
+      let j = i;
+      while (j < n && EMAIL_LOCAL[src.charCodeAt(j)] === 1) j++;
+      if (src.charCodeAt(j) === 64) {
+        const m = matchEmail(src, i);
+        if (m) {
+          flushText();
+          items.push({ g: 'mailto:' + m.email, t: m.email, s: i });
+          i = m.next;
+          continue;
+        }
       }
     }
 
-    textBuf += src[i];
+    if (textStart === -1) textStart = i;
     i++;
   }
   flushText();
@@ -3718,7 +3736,9 @@ function renderListItem(item, loose, refs, out, doc) {
 // parse(markdown) returns the HTML marked 18.1.3 renders with default
 // options (GFM on, breaks off). Line endings are normalized to \n first.
 export function parse(markdown) {
-  const src = markdown.replace(/\r\n?/g, '\n');
+  // The indexOf skips the regex when there is no \r at all, which is
+  // nearly every input.
+  const src = markdown.indexOf('\r') === -1 ? markdown : markdown.replace(/\r\n?/g, '\n');
   const srcEndsNL = src.endsWith('\n');
   const lines = src.split('\n');
   if (srcEndsNL) lines.pop();
