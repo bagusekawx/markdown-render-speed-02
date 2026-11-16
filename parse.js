@@ -2196,6 +2196,30 @@ function blankSpacesOnly(line) {
   return line.length === 0;
 }
 
+// A line is blank for trailing-newline purposes when it is empty or
+// holds only quote markers and whitespace (e.g. `>` or `>  `): the
+// quote contributes no content after the HTML block.
+function blankAfterQuotes(line) {
+  if (line.length === 0) return true;
+  let i = 0;
+  const n = line.length;
+  let sawQuote = false;
+  for (;;) {
+    // Spaces only: a tab anywhere means the line is not blank.
+    while (i < n && line.charCodeAt(i) === 32) i++;
+    if (i < n && line.charCodeAt(i) === 62) {
+      sawQuote = true;
+      i++;
+      if (i < n && line.charCodeAt(i) === 32) i++;
+      continue;
+    }
+    break;
+  }
+  // Blank only when a quote marker was present (a bare spaces-only
+  // line still keeps the newline).
+  return sawQuote && i >= n;
+}
+
 function mkBlock(t, parent) {
   const b = {
     t,
@@ -3057,7 +3081,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         if (leaf.htmlType <= 5 && leaf.endTag) {
           if (line.toLowerCase().indexOf(leaf.endTag) >= 0) {
             leaf.trailingNL =
-              li + 1 < lines.length && !blankSpacesOnly(lines[li + 1]);
+              li + 1 < lines.length && !blankAfterQuotes(lines[li + 1]);
             finalizeBlock(leaf);
           }
         }
@@ -3214,7 +3238,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
           // Types 1-5 keep the trailing newline when a non-blank line
           // follows the end-tag line (a tab-only line counts).
           hb.trailingNL =
-            li + 1 < lines.length && !blankSpacesOnly(lines[li + 1]);
+            li + 1 < lines.length && !blankAfterQuotes(lines[li + 1]);
           finalizeBlock(hb);
         }
         consumed = true;
@@ -3362,7 +3386,12 @@ function parseBlocks(lines, endsWithNL, ctx) {
       content = contentAfter(line, offset, col, spaces, 0, true, tabBase);
     }
     if (openPara) {
-      openPara.lines.push(content);
+      // A container-matched blank line with no content at all adds
+      // nothing (a trailing empty line would render a stray '\n');
+      // a blank line holding a space still pushes it (cm-241).
+      if (!(content === '' && blankFrom(line, offset))) {
+        openPara.lines.push(content);
+      }
     } else {
       // A new paragraph when phase 1 stopped inside a list means the
       // list ended: finalize it so a later list item starts fresh.
