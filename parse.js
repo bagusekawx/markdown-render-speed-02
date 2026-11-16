@@ -2136,7 +2136,13 @@ function contentAfter(line, offset, col, spaces, n, expandTab, tabBase, dropVirt
   // (input spaces === 0) are discarded: a top-level indented fence
   // removes a leading tab entirely. Virtual spaces passed in from
   // container matching (input spaces > 0) are kept.
-  const leadSpaces = dropVirt && spaces === 0 ? 0 : a.spaces;
+  let leadSpaces = dropVirt && spaces === 0 ? 0 : a.spaces;
+  // A tab directly after '>' was partly consumed by the quote match;
+  // in fenced code the quote-frame width is one less than the
+  // absolute-frame virtual spaces.
+  if (dropVirt && n === 0 && inQuote && spaces > 0 && leadSpaces > 0) {
+    leadSpaces -= 1;
+  }
   let s = (leadSpaces ? ' '.repeat(leadSpaces) : '') + line.slice(a.offset);
   // In code content (and quote/list paragraph content), if any
   // indentation was stripped and the leading whitespace contains a
