@@ -1124,8 +1124,15 @@ function processEmphasis(delimiters) {
             const last = em.cl;
             const lastHasSpace =
               last && last.t === 0 && last.s.charCodeAt(0) === 32;
+            // The move only applies when real text follows the inner
+            // em/strong (last child is text holding an alnum char);
+            // a lone backtick or punctuation after it does not count.
+            const lastIsText =
+              last &&
+              last.t === 0 &&
+              /[A-Za-z0-9]/.test(last.s);
             let moreOpeners = false;
-            if (hasDiffChild && !lastHasSpace && !current.didMatch) {
+            if (hasDiffChild && !lastHasSpace && lastIsText && !current.didMatch) {
               let o = openerPrev;
               while (o) {
                 if (o.c === current.c && o.canOpen && o.par === current.par) {
@@ -1135,7 +1142,7 @@ function processEmphasis(delimiters) {
                 o = o.dprev;
               }
             }
-            if (hasDiffChild && !lastHasSpace && !current.didMatch && !moreOpeners) {
+            if (hasDiffChild && !lastHasSpace && lastIsText && !current.didMatch && !moreOpeners) {
               if (current.len <= 2) {
                 unlinkNode(current);
                 appendNode(em, current);
