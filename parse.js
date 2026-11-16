@@ -874,9 +874,18 @@ function trimGfmUrl(src, start, end) {
       continue;
     }
     if (c === 41) {
+      // Count parens only after the last ']' (a ')' before ']' is
+      // link syntax, not part of the URL's paren balance).
+      let countFrom = start;
+      for (let k = e - 1; k >= start; k--) {
+        if (src.charCodeAt(k) === 93) {
+          countFrom = k + 1;
+          break;
+        }
+      }
       let open = 0;
       let close = 0;
-      for (let k = start; k < e; k++) {
+      for (let k = countFrom; k < e; k++) {
         const cc = src.charCodeAt(k);
         if (cc === 40) open++;
         else if (cc === 41) close++;
@@ -903,7 +912,23 @@ function scanGfmPath(src, i) {
     const c = src.charCodeAt(j);
     if (c === 32 || c === 9 || c === 10 || c === 60 || c === 62) break;
     if (c === 40) {
-      if (balance < 0) break;
+      if (balance < 0) {
+        // '(' after an unmatched ')': stop only if the paren group
+        // holds a space (a link dest + title follows, e.g.
+        // `](https://x.com (Title))`); a spaceless group like
+        // `](./docs/a.md)` is part of the URL.
+        let k = j + 1;
+        let depth = 1;
+        let hasSpace = false;
+        while (k < n && depth > 0) {
+          const cc = src.charCodeAt(k);
+          if (cc === 40) depth++;
+          else if (cc === 41) depth--;
+          else if (cc === 32 || cc === 9 || cc === 10) hasSpace = true;
+          k++;
+        }
+        if (hasSpace) break;
+      }
       balance++;
     } else if (c === 41) {
       balance--;
