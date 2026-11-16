@@ -317,21 +317,15 @@ function isHexDigit(c) {
   );
 }
 
-// Like encodeURI, but an existing %XX sequence is left intact (marked does
-// not double-encode %20 in a destination).
+// Like encodeURI, but % is left as-is: marked never percent-encodes a
+// percent sign (neither a bare % nor one starting a %XX sequence).
 function encodeUrlPart(s) {
   if (s.indexOf('%') < 0) return encodeURI(s);
   let out = '';
   let start = 0;
   for (let i = 0; i < s.length; i++) {
-    if (
-      s.charCodeAt(i) === 37 &&
-      i + 2 < s.length &&
-      isHexDigit(s.charCodeAt(i + 1)) &&
-      isHexDigit(s.charCodeAt(i + 2))
-    ) {
-      out += encodeURI(s.slice(start, i)) + s.slice(i, i + 3);
-      i += 2;
+    if (s.charCodeAt(i) === 37) {
+      out += encodeURI(s.slice(start, i)) + '%';
       start = i + 1;
     }
   }
@@ -1767,9 +1761,20 @@ function indentFrom(line, offset, col, spaces) {
   return { indent: ind, offset: o, col: c, spaces: 0 };
 }
 
-function contentAfter(line, offset, col, spaces, n) {
+function contentAfter(line, offset, col, spaces, n, expandTab) {
   const a = advCols(line, offset, col, spaces, n);
-  return (a.spaces ? ' '.repeat(a.spaces) : '') + line.slice(a.offset);
+  let s = (a.spaces ? ' '.repeat(a.spaces) : '') + line.slice(a.offset);
+  // In code content, if any indentation was stripped and the content
+  // starts with a tab, the tab expands to spaces based on the column
+  // (a tab at the start of an unstripped line is kept verbatim).
+  if (
+    expandTab &&
+    s.charCodeAt(0) === 9 &&
+    (n > 0 || offset > 0 || col > 0)
+  ) {
+    s = ' '.repeat(4 - (a.col % 4)) + s.slice(1);
+  }
+  return s;
 }
 
 function blankFrom(line, offset) {
@@ -2449,6 +2454,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
     let container = root;
     let leaf = null;
     let matchedContainer = false;
+    let brokeAtQuote = false;
 
     // Phase 1: match open containers.
     for (;;) {
@@ -2456,7 +2462,10 @@ function parseBlocks(lines, endsWithNL, ctx) {
       if (!last) break;
       if (last.t === 'quote') {
         const m = matchQuote(line, offset, col, spaces);
-        if (!m) break;
+        if (!m) {
+          brokeAtQuote = true;
+          break;
+        }
         offset = m.offset;
         col = m.col;
         spaces = m.spaces;
@@ -2487,6 +2496,27 @@ function parseBlocks(lines, endsWithNL, ctx) {
     }
 
     // Phase 1b: open leaf consumption (code, html).
+    if (!leaf && !brokeAtQuote) {
+      // Phase 1 broke at a list container, but a fenced code block is
+      // open: marked keeps consuming lines as code content even when
+      // they do not match the enclosing list. (A failed blockquote
+      // match does end the code block.)
+      const tip = deepestOpen();
+      if (tip.t === 'code' && tip.fenced) {
+        if (
+          isClosingFence(line, offset, col, spaces, tip.fenceCh, tip.fenceLen)
+        ) {
+          tip.closed = true;
+          finalizeBlock(tip);
+        } else {
+          tip.lines.push({
+            s: contentAfter(line, offset, col, spaces, tip.fenceIndent, true),
+            term: terminated,
+          });
+        }
+        continue;
+      }
+    }
     if (leaf && leaf.t === 'code' && leaf.fenced) {
       if (
         isClosingFence(line, offset, col, spaces, leaf.fenceCh, leaf.fenceLen)
@@ -2495,7 +2525,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         finalizeBlock(leaf);
       } else {
         leaf.lines.push({
-          s: contentAfter(line, offset, col, spaces, leaf.fenceIndent),
+          s: contentAfter(line, offset, col, spaces, leaf.fenceIndent, true),
           term: terminated,
         });
       }
@@ -2668,9 +2698,14 @@ function parseBlocks(lines, endsWithNL, ctx) {
         break;
       }
       const item = matchListItem(line, offset, col, spaces);
+      // The "ordered list must start with 1 to interrupt a paragraph"
+      // rule applies only to top-level lists; a nested ordered list
+      // interrupts a paragraph regardless of its start number.
+      const startOk =
+        !item || container !== root || !item.ordered || item.start === 1;
       if (
         item &&
-        (!paraBlocks || (!item.empty && (!item.ordered || item.start === 1)))
+        (!paraBlocks || (!item.empty && startOk))
       ) {
         if (openPara) {
           finalizeBlock(openPara);
