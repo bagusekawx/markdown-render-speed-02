@@ -1550,9 +1550,10 @@ function parseInline(src, ctx) {
         // Full or collapsed reference [label] or []. If a complete
         // [...] follows but matches nothing, there is NO shortcut
         // fallback; if there is no complete [...], fall back.
-        // A poisoned bracket (odd-inner-backtick code span) never
-        // forms a reference link (neither full nor shortcut).
-        const lbl = br.poisoned ? null : parseRefLabel(src, after);
+        // (A poisoned bracket whose ] is not immediately after the
+        // code span was already rejected above; one that IS
+        // immediately after may still form a reference link.)
+        const lbl = parseRefLabel(src, after);
         if (lbl) {
           const rawLabel =
             lbl.raw === '' ? src.slice(br.pos + 1, i) : lbl.raw;
