@@ -8,7 +8,7 @@
 // text; link reference definitions are pulled out of paragraphs when they finalize; inline
 // parsing runs per block at render time, after every definition in the document is known.
 // Inline parsing scans once into a flat item list, resolves links with a bracket stack,
-// resolves emphasis with the CommonMark delimiter algorithm, then renders.
+// resolves emphasis with a forward scan per opener, then renders.
 
 /* ------------------------------------------------------------------ */
 /* Character helpers                                                   */
@@ -20,6 +20,7 @@ for (const c of '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~') ASCII_PUNCT[c.charCodeAt(0
 
 const PUNCT_RE = /[\p{P}\p{S}]/u; // Unicode punctuation + symbols, non-ASCII only (the spec counts symbols as punctuation for emphasis flanking: $, £, €)
 const ZS_RE = /\p{Zs}/u; // Unicode space separators, for non-ASCII chars only
+const ALNUM_RE = /[\p{L}\p{N}]/u; // Unicode letters + numbers, for the '_' intra-word rule
 
 function isSpace(ch) {
   // CommonMark "Unicode whitespace": space, tab, LF, FF, CR + Zs category.
@@ -197,8 +198,11 @@ function normalizeLabel(label) {
 /* Inline parsing                                                      */
 /*                                                                     */
 /* Items in a parsed inline list:                                      */
-/*   string            text run (escapes/entities resolved)            */
-/*   {d,n,o,c}         emphasis delimiter run (d: 42 '*' or 95 '_')    */
+/*   string            text run                                            */
+/*   {v}               escape / numeric-reference character (non-text)   */
+/*   {d,n,p,q}         delimiter run (d: 42 '*', 95 '_', 126 '~'; p/q:    */
+/*                     code points before/after the run in the masked    */
+/*                     source, -1 when absent)                           */
 /*   {c}               code span                                       */
 /*   {h}               raw HTML                                        */
 /*   {b}               hard break (<br>)                                */
@@ -228,19 +232,6 @@ function cpAt(s, i) {
     if (lo >= 0xdc00 && lo <= 0xdfff) return (hi - 0xd800) * 0x400 + (lo - 0xdc00) + 0x10000;
   }
   return hi;
-}
-
-// Flanking for a delimiter run starting at `start` and ending at `end` (exclusive).
-function flanking(s, start, end) {
-  const prev = cpBefore(s, start);
-  const next = cpAt(s, end);
-  const prevSpace = prev === -1 || isSpace(prev);
-  const prevPunct = prev !== -1 && isPunct(prev);
-  const nextSpace = next === -1 || isSpace(next);
-  const nextPunct = next !== -1 && isPunct(next);
-  const left = !nextSpace && (!nextPunct || prevSpace || prevPunct);
-  const right = !prevSpace && (!prevPunct || nextSpace || nextPunct);
-  return { left, right, prevPunct, nextPunct };
 }
 
 // Skip ASCII spaces/tabs/newlines; returns the new index.
@@ -797,12 +788,33 @@ function scanInline(src, refs) {
       textBuf = '';
     }
   };
-  // Push a string as its own item (a token boundary: marked escapes each
-  // text token on its own, so an & produced by an escape or an entity must
-  // not join the &word; lookahead of what follows it).
+  // Push an escape or numeric-reference character as its own item (a token
+  // boundary: marked escapes each text token on its own, so an & produced
+  // by an escape or an entity must not join the &word; lookahead of what
+  // follows it). These are {v} items, not strings: marked treats an escape
+  // as a non-text token, so a delimiter run after one sees no previous
+  // text character.
   const pushTextItem = (t) => {
     flushText();
-    items.push(t);
+    items.push({ v: t });
+  };
+
+  // The masked-source code point before the current position, for a
+  // delimiter run starting here: the previous text character, or a
+  // representative for a non-text token (escapes mask to '+', links and
+  // code spans to '[...]', a hard break to a newline, a bare URL keeps its
+  // last character). -1 when nothing precedes it.
+  const prevCpForDelim = () => {
+    if (textBuf !== '') return cpBefore(textBuf, textBuf.length);
+    if (items.length === 0) return -1;
+    const it = items[items.length - 1];
+    if (typeof it === 'string') return cpBefore(it, it.length);
+    if (it.v !== undefined) return 43; // '+'
+    if (it.c !== undefined || it.l !== undefined || it.i !== undefined || it.h !== undefined || it.a !== undefined) return 93; // ']'
+    if (it.g !== undefined) return it.t.length === 0 ? -1 : cpBefore(it.t, it.t.length);
+    if (it.b !== undefined) return 10;
+    if (it.d !== undefined) return it.d;
+    return 93;
   };
 
   let i = 0;
@@ -880,60 +892,30 @@ function scanInline(src, refs) {
       continue;
     }
 
-    // Emphasis delimiter run.
+    // Emphasis delimiter run. The resolver works out opening/closing
+    // from the neighbouring characters in the masked source, so record
+    // the code points around the run: p (before) and q (after).
     if (c === 42 || c === 95) {
       let run = 0;
       while (i + run < n && src.charCodeAt(i + run) === c) run++;
-      const fl = flanking(src, i, i + run);
-      let canOpen;
-      let canClose;
-      if (c === 42) {
-        canOpen = fl.left;
-        canClose = fl.right;
-      } else {
-        canOpen = fl.left && (!fl.right || fl.prevPunct);
-        canClose = fl.right && (!fl.left || fl.nextPunct);
-      }
+      const p = prevCpForDelim();
+      const q = i + run < n ? cpAt(src, i + run) : -1;
       flushText();
-      items.push({ d: c, n: run, o: canOpen, cl: canClose });
+      items.push({ d: c, n: run, p, q });
       i += run;
       continue;
     }
 
-    // Strikethrough: a run of exactly 1-2 tildes, matching a later run of
-    // the same length (marked's rule: 3+ tildes never form <del>).
+    // Strikethrough delimiter run: the resolver matches runs of the same
+    // length (3+ tildes never form <del>).
     if (c === 126) {
       let run = 0;
       while (i + run < n && src.charCodeAt(i + run) === 126) run++;
-      let done = false;
-      if ((run === 1 || run === 2) && i + run < n && !isSpace(cpAt(src, i + run))) {
-        let j = i + run;
-        let closer = -1;
-        while (j < n) {
-          if (src.charCodeAt(j) === 126) {
-            let r2 = 0;
-            while (j + r2 < n && src.charCodeAt(j + r2) === 126) r2++;
-            if (r2 === run && !isSpace(cpBefore(src, j))) {
-              closer = j;
-              break;
-            }
-            j += r2;
-          } else {
-            j++;
-          }
-        }
-        if (closer !== -1) {
-          const inner = parseInline(src.slice(i + run, closer), refs);
-          flushText();
-          items.push({ x: 1, k: inner });
-          i = closer + run;
-          done = true;
-        }
-      }
-      if (!done) {
-        textBuf += src.slice(i, i + run);
-        i += run;
-      }
+      const p = prevCpForDelim();
+      const q = i + run < n ? cpAt(src, i + run) : -1;
+      flushText();
+      items.push({ d: 126, n: run, p, q });
+      i += run;
       continue;
     }
 
@@ -1165,95 +1147,164 @@ function scanInline(src, refs) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Emphasis (the CommonMark delimiter algorithm)                       */
+/* Emphasis (marked's forward-scan algorithm)                          */
 /* ------------------------------------------------------------------ */
 
-// Resolve emphasis/strong in one inline list, recursing into link and image
-// children. Delimiters cannot match across a link boundary. Runs the classic
-// algorithm: closers in document order, each taking the nearest earlier
-// opener of the same character that passes the odd-match rule.
+// Character class of a code point beside a delimiter run: 0 = absent,
+// 1 = whitespace, 2 = punctuation/symbol, 3 = anything else. A tilde
+// counts as a word character for '*' runs (GFM) and as punctuation
+// for '_' and '~' runs.
+function delimClass(cp, tildeWord) {
+  if (cp === -1) return 0;
+  if (cp === 126) return tildeWord ? 3 : 2;
+  if (isSpace(cp)) return 1;
+  if (isPunct(cp)) return 2;
+  return 3;
+}
+
+function isAlnumCp(cp) {
+  if (cp === -1) return false;
+  return ALNUM_RE.test(String.fromCodePoint(cp));
+}
+
+// Try to match the delimiter run at items[oi] as an opener: scan forward
+// over later runs of the same character, counting pending openers, and
+// close when the count runs out. Runs that can both open and close (and,
+// when the opener can also close, every closer) are skipped by the rule
+// of 3 instead of closing. On a match, splices an em/strong/del node
+// into the list (leftovers of the opener stay inside the node, leftovers
+// of the closer past the adjusted length stay after it) and returns the
+// index after the node; otherwise returns -1.
+function tryMatchDelim(items, oi) {
+  const opener = items[oi];
+  const r = opener.d;
+  const k = opener.n;
+  const isDel = r === 126;
+  if (isDel && k > 2) return -1; // 3+ tildes never form <del>
+  // A retry (a run shortened after a failed attempt) sees the character
+  // before the original run as its previous character, and always counts
+  // as preceded by its own character.
+  const retry = opener.retry === true;
+  const y = retry ? opener.y : k;
+  let nCp = -1;
+  if (retry) {
+    nCp = opener.p;
+  } else if (oi > 0) {
+    const prev = items[oi - 1];
+    if (typeof prev === 'string') nCp = cpBefore(prev, prev.length);
+    else if (prev !== null && typeof prev === 'object' && prev.d !== undefined) nCp = prev.d;
+  }
+  const tildeWord = r === 42;
+  const nc = delimClass(opener.q, true); // GFM: '~' is a word character here
+  // The run must be followed by a punctuation or word character.
+  if (nc < 2) return -1;
+  // '_' cannot open inside a word.
+  if (r === 95 && nc === 3 && isAlnumCp(nCp)) return -1;
+  // Can it open? A word character after the run always opens; a
+  // punctuation character after it opens only when the previous character
+  // is absent, whitespace, or punctuation.
+  if (nc === 2 && nCp !== -1 && delimClass(nCp, false) === 3) return -1;
+  // R: the opener can also close (every closer is then rule-of-3-checked).
+  const pcPunct = delimClass(opener.p, false);
+  const R = (pcPunct === 2 || pcPunct === 3) && (nc === 2 || (r === 42 && pcPunct === 3));
+  const o = retry || nCp === r;
+  let m = k;
+  let f = 0;
+  for (let ci = oi + 1; ci < items.length; ci++) {
+    const cand = items[ci];
+    if (cand === null || typeof cand !== 'object' || cand.d !== r) continue;
+    const b = cand.n;
+    if (isDel && b !== k) continue; // del only matches equal-length runs
+    const cpc = delimClass(cand.p, tildeWord);
+    const cnc = delimClass(cand.q, tildeWord);
+    // Opener (groups 3/4), both (groups 5/6; '_' has no group 6),
+    // closer (groups 1/2), or invisible.
+    const gOpener = ((cpc === 1 || cpc === 2) && cnc === 3) || (cpc === 1 && cnc === 2);
+    if (gOpener) {
+      m += b;
+      continue;
+    }
+    const gBoth = (cpc === 2 && cnc === 2) || (r !== 95 && cpc === 3 && cnc === 3);
+    const gCloser = (cpc === 2 && cnc <= 1) || (cpc === 3 && cnc <= 2);
+    if (!gBoth && !gCloser) continue; // invisible
+    if (isDel) {
+      m -= b;
+      if (m > 0) continue;
+      const inner = [];
+      for (let j = oi + 1; j < ci; j++) inner.push(items[j]);
+      resolveEmphasis(inner);
+      items.splice(oi, ci - oi + 1, { x: 1, k: inner });
+      return oi + 1;
+    }
+    if (gBoth || R) {
+      if (o && gBoth) return -1; // the opener's own run blocks the match
+      if (y % 3 !== 0 && (y + b) % 3 === 0) {
+        f += b;
+        continue;
+      }
+    }
+    m -= b;
+    if (m > 0) continue;
+    const b2 = Math.min(b, b + m + f);
+    const use = Math.min(k, b2) % 2 === 1 ? 1 : 2;
+    const inner = [];
+    if (k - use > 0) inner.push({ d: r, n: k - use, p: -1, q: opener.q });
+    for (let j = oi + 1; j < ci; j++) inner.push(items[j]);
+    if (b2 - use > 0) inner.push({ d: r, n: b2 - use, p: cand.p, q: -1 });
+    resolveEmphasis(inner);
+    const node = use === 1 ? { e: 1, k: inner } : { s: 1, k: inner };
+    const rep = [node];
+    if (b - b2 > 0) rep.push({ d: r, n: b - b2, p: r, q: cand.q });
+    items.splice(oi, ci - oi + 1, ...rep);
+    return oi + 1;
+  }
+  return -1;
+}
+
+// Resolve emphasis in an item list, left to right: each delimiter run is
+// tried as an opener in turn, and a match re-resolves its inner items.
 function resolveEmphasis(items) {
+  // Link and image labels are tokenized on their own: resolve them first.
   for (const it of items) {
     if (it !== null && typeof it === 'object' && (it.l !== undefined || it.i !== undefined)) resolveEmphasis(it.k);
   }
-  const delims = [];
-  for (let idx = 0; idx < items.length; idx++) {
-    const it = items[idx];
-    if (it !== null && typeof it === 'object' && it.d !== undefined) {
-      delims.push({ i: idx, ch: it.d, n: it.n, o: it.o, cl: it.cl });
-    }
+  // A delimiter at either end of this list has no neighbour on that side
+  // (the list is re-tokenized from scratch).
+  if (items.length > 0) {
+    const first = items[0];
+    if (first !== null && typeof first === 'object' && first.d !== undefined) first.p = -1;
+    const last = items[items.length - 1];
+    if (last !== null && typeof last === 'object' && last.d !== undefined) last.q = -1;
   }
-  if (delims.length === 0) return;
-  let ci = 0;
-  while (ci < delims.length) {
-    const closer = delims[ci];
-    if (!closer.cl || closer.n === 0) {
-      ci++;
+  let di = 0;
+  while (di < items.length) {
+    const it = items[di];
+    if (it === null || typeof it !== 'object' || it.d === undefined || it.done) {
+      di++;
       continue;
     }
-    let oi = -1;
-    for (let j = ci - 1; j >= 0; j--) {
-      const op = delims[j];
-      if (op.ch !== closer.ch || !op.o || op.n === 0) continue;
-      // Odd-match rule: when EITHER delimiter can both open and close, a
-      // match is forbidden when the lengths sum to a multiple of 3,
-      // unless both lengths are multiples of 3.
-      if ((op.o && op.cl) || (closer.o && closer.cl)) {
-        if ((op.n + closer.n) % 3 === 0 && (op.n % 3 !== 0 || closer.n % 3 !== 0)) continue;
+    const after = tryMatchDelim(items, di);
+    if (after === -1) {
+      if (it.n > 1) {
+        // A failed run is retried from its second character (the first
+        // becomes literal text), with the original length kept for the
+        // rule of 3.
+        const rest = {
+          d: it.d,
+          n: it.n - 1,
+          p: it.p,
+          q: it.q,
+          y: it.y !== undefined ? it.y : it.n,
+          retry: true,
+        };
+        items.splice(di, 1, String.fromCodePoint(it.d), rest);
+        di++; // move to the shortened run
+      } else {
+        it.done = true;
+        di++;
       }
-      oi = j;
-      break;
-    }
-    if (oi === -1) {
-      ci++;
-      continue;
-    }
-    const opener = delims[oi];
-    const use = opener.n >= 2 && closer.n >= 2 ? 2 : 1;
-    const oiItem = opener.i;
-    const ciItem = closer.i;
-    const node =
-      use === 2
-        ? { s: 1, k: items.slice(oiItem + 1, ciItem) }
-        : { e: 1, k: items.slice(oiItem + 1, ciItem) };
-    const openerLeft = opener.n - use;
-    const closerLeft = closer.n - use;
-    const rep = [];
-    if (openerLeft > 0) rep.push({ d: opener.ch, n: openerLeft, o: opener.o, cl: opener.cl });
-    rep.push(node);
-    if (closerLeft > 0) rep.push({ d: closer.ch, n: closerLeft, o: closer.o, cl: closer.cl });
-    const removed = ciItem - oiItem + 1;
-    items.splice(oiItem, removed, ...rep);
-    const delta = rep.length - removed;
-    const kept = [];
-    for (const d of delims) {
-      if (d === opener) {
-        if (openerLeft > 0) {
-          d.n = openerLeft;
-          d.i = oiItem;
-          kept.push(d);
-        }
-        continue;
-      }
-      if (d === closer) {
-        if (closerLeft > 0) {
-          d.n = closerLeft;
-          d.i = oiItem + rep.length - 1;
-          kept.push(d);
-        }
-        continue;
-      }
-      if (d.i > oiItem && d.i < ciItem) continue; // swallowed into the new node
-      if (d.i > ciItem) d.i += delta;
-      kept.push(d);
-    }
-    delims.length = 0;
-    delims.push(...kept);
-    if (closerLeft > 0) {
-      ci = delims.indexOf(closer);
     } else {
-      ci = delims.findIndex((d) => d.i >= oiItem + rep.length);
-      if (ci === -1) ci = delims.length;
+      di = after;
     }
   }
 }
@@ -1276,7 +1327,11 @@ function renderInline(items, out, inLink) {
       continue;
     }
     if (it.d !== undefined) {
-      out.push((it.d === 42 ? '*' : '_').repeat(it.n));
+      out.push((it.d === 42 ? '*' : it.d === 95 ? '_' : '~').repeat(it.n));
+      continue;
+    }
+    if (it.v !== undefined) {
+      out.push(escText(it.v));
       continue;
     }
     if (it.c !== undefined) {
@@ -1353,7 +1408,11 @@ function plainText(items, out) {
       continue;
     }
     if (it.d !== undefined) {
-      out.push((it.d === 42 ? '*' : '_').repeat(it.n));
+      out.push((it.d === 42 ? '*' : it.d === 95 ? '_' : '~').repeat(it.n));
+      continue;
+    }
+    if (it.v !== undefined) {
+      out.push(escText(it.v));
       continue;
     }
     if (it.c !== undefined) {
