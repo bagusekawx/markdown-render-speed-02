@@ -2130,7 +2130,7 @@ function indentFrom(line, offset, col, spaces) {
   return { indent: ind, offset: o, col: c, spaces: 0 };
 }
 
-function contentAfter(line, offset, col, spaces, n, expandTab, tabBase, dropVirt) {
+function contentAfter(line, offset, col, spaces, n, expandTab, tabBase, dropVirt, inQuote) {
   const a = advCols(line, offset, col, spaces, n);
   // In fenced code, virtual spaces created by the indent strip itself
   // (input spaces === 0) are discarded: a top-level indented fence
@@ -2145,6 +2145,12 @@ function contentAfter(line, offset, col, spaces, n, expandTab, tabBase, dropVirt
   // top-level line is kept verbatim).
   if (expandTab && (n > 0 || offset > 0 || col > 0)) {
     const base = (tabBase || 0);
+    // In fenced code (not in a quote), a tab stays literal when
+    // the fence stripped indent (n > 0); it expands only when
+    // nothing was stripped. Inside a quote, tabs always expand.
+    if (dropVirt && n > 0 && !inQuote) {
+      return s;
+    }
     let k = 0;
     let c = a.col - base;
     let out = '';
@@ -2851,6 +2857,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
     let col = 0;
     let spaces = 0;
     let tabBase = 0;
+    let matchedQuote = false;
     let container = root;
     let leaf = null;
     let matchedContainer = false;
@@ -2871,6 +2878,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         col = m.col;
         spaces = m.spaces;
         tabBase = col - 2;
+        matchedQuote = true;
         container = last;
         matchedContainer = true;
       } else if (last.t === 'item') {
@@ -2975,7 +2983,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
           } else {
             const strip = tip.fenceCh === "~" ? 0 : tip.fenceIndent;
             tip.lines.push({
-              s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true),
+              s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true, matchedQuote),
               term: terminated,
             });
             continue;
@@ -2990,7 +2998,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
         } else {
           const strip = tip.fenceCh === "~" ? 0 : tip.fenceIndent;
           tip.lines.push({
-            s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true),
+            s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true, matchedQuote),
             term: terminated,
           });
           continue;
@@ -3006,7 +3014,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
       } else {
         const strip = leaf.fenceCh === "~" ? 0 : leaf.fenceIndent;
         leaf.lines.push({
-          s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true),
+          s: contentAfter(line, offset, col, spaces, strip, true, tabBase, true, matchedQuote),
           term: terminated,
         });
       }
