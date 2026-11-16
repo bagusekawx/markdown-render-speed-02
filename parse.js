@@ -1021,7 +1021,39 @@ function processEmphasis(delimiters) {
           }
           const use = opener.len >= 2 && current.len >= 2 ? 2 : 1;
           const tag = current.c === '~' ? 7 : use === 2 ? 6 : 5;
+          // A single-delimiter * em does not form around a strong whose
+          // opener followed whitespace and whose closer precedes a
+          // non-space (`*a **b**c*` stays literal, but `*a**b**c*` and
+          // `*a **b** c*` form em). A _ em is not blocked by a **
+          // strong, and neither is an em whose closer is the same run
+          // that closed the strong (`***`).
+          if (use === 1 && tag === 5 && current.c === '*') {
+            let blocked = false;
+            let node = opener.n;
+            while (node && node !== current) {
+              if (
+                node.t === 6 &&
+                node.blocksEm &&
+                node.formedBy !== current
+              ) {
+                blocked = true;
+                break;
+              }
+              node = node.n;
+            }
+            if (blocked) {
+              opener = openerPrev;
+              continue;
+            }
+          }
           const em = mkNode(tag);
+          // A ** strong whose opener followed whitespace and whose
+          // closer precedes a non-space blocks an outer single * em.
+          // A __ strong does not block a * em.
+          if (tag === 6 && current.c === '*' && opener.prevWs && !current.nextWs) {
+            em.blocksEm = true;
+            em.formedBy = current;
+          }
           // Move the nodes between opener and closer into the new node.
           let node = opener.n;
           while (node && node !== current) {
@@ -1262,6 +1294,8 @@ function parseInline(src, ctx) {
       d.c = String.fromCharCode(c);
       d.len = runLen;
       d.pos = i;
+      d.prevWs = beforeSpace;
+      d.nextWs = afterSpace;
       if (c === 95) {
         d.canOpen = leftFlank && (!rightFlank || beforePunct);
         d.canClose = rightFlank && (!leftFlank || afterPunct);
