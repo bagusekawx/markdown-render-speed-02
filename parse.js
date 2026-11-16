@@ -1598,6 +1598,9 @@ function parseInline(src, ctx) {
       if ((br.btRuns || 0) > 0) {
         const nl = src.indexOf('\n', linkEnd);
         noEmphasisUntil = nl >= 0 ? nl : n;
+      } else {
+        // A link without unmatched backticks clears the suppression.
+        noEmphasisUntil = -1;
       }
       const node = mkNode(br.isImage ? 9 : 8);
       node.href = cleanUrl(dest);
