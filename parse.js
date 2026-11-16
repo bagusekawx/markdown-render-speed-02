@@ -194,7 +194,7 @@ function parseDest(s, i) {
   const n = s.length;
   if (i >= n) return null;
   if (s.charCodeAt(i) === 60) {
-    // <...> form: no <, newline, or unescaped > inside.
+    // <...> form: no <, newline, or unescaped > inside (spaces OK).
     let j = i + 1;
     let out = '';
     while (j < n) {
@@ -1316,6 +1316,12 @@ function parseInline(src, ctx) {
         i = close + runLen;
         textStart = i;
       } else {
+        // Unmatched backticks: count them per open bracket. A link
+        // is blocked only when its text holds exactly ONE unmatched
+        // backtick run (0 or 2+ do not block).
+        for (const br of brackets) {
+          if (br.active) br.unmatchedBt = (br.unmatchedBt || 0) + 1;
+        }
         i = j;
       }
       continue;
@@ -1406,6 +1412,14 @@ function parseInline(src, ctx) {
         continue;
       }
       const br = brackets[bIdx];
+      // A bracket whose text holds exactly one unmatched backtick
+      // run can never form a link or image: deactivate it and treat
+      // ] as literal.
+      if (br.unmatchedBt === 1) {
+        br.active = false;
+        i++;
+        continue;
+      }
       let linkEnd = -1;
       let dest = null;
       let title = null;
