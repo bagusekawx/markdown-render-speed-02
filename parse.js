@@ -2655,21 +2655,21 @@ function parseBlocks(lines, endsWithNL, ctx) {
       }
       if (matchedContainer) {
         // The blank line matched a container (e.g. `>` or a list
-        // item): it ends the open leaf (paragraph) but not the
-        // containers, which stay open until a later non-blank line
-        // fails to match them.
-        const tip = deepestOpen();
-        if (
-          tip.t === 'para' ||
-          tip.t === 'head' ||
-          tip.t === 'code' ||
-          tip.t === 'html'
-        ) {
+        // item): it ends the open leaf and any unmatched QUOTES below
+        // the matched container, but lists/items stay open until a
+        // later non-blank line fails to match them.
+        const origTip = deepestOpen();
+        let tip = origTip;
+        while (tip !== container) {
+          const parent = tip.parent;
+          if (tip.t === 'list' || tip.t === 'item') break;
           finalizeBlock(tip);
+          tip = parent;
         }
         pbLastBlank = li;
         pbBlankWasItem =
-          container.t === 'item' || (tip.parent && tip.parent.t === 'item');
+          container.t === 'item' ||
+          (origTip.parent && origTip.parent.t === 'item');
         // A blank line closes an empty list item.
         if (container.t === 'item' && container.ch.length === 0) {
           finalizeBlock(container);
@@ -2877,9 +2877,10 @@ function parseBlocks(lines, endsWithNL, ctx) {
 
     // Paragraph: continue the open one or start a new one. marked keeps
     // the line's leading spaces (only the container indent is removed),
-    // except on lazy continuation lines, where they are stripped.
+    // except on lazy continuation lines where no container matched,
+    // where they are stripped.
     let content;
-    if (openPara && openParaLazy) {
+    if (openPara && openParaLazy && offset === 0) {
       const ind = indentFrom(line, offset, col, spaces);
       content = line.slice(ind.offset);
     } else {
