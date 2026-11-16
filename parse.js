@@ -1787,6 +1787,7 @@ function mkBlock(t, parent) {
     lines: null,
     level: 0,
     fenced: false,
+    closed: false,
     info: '',
     fenceCh: '',
     fenceLen: 0,
@@ -2488,6 +2489,7 @@ function parseBlocks(lines, endsWithNL, ctx) {
       if (
         isClosingFence(line, offset, col, spaces, leaf.fenceCh, leaf.fenceLen)
       ) {
+        leaf.closed = true;
         finalizeBlock(leaf);
       } else {
         leaf.lines.push({
@@ -2589,6 +2591,10 @@ function parseBlocks(lines, endsWithNL, ctx) {
 
     for (;;) {
       if (blankFrom(line, offset)) {
+        // A blank remainder after container matching: if a paragraph is
+        // open, the spaces are its content (fall through); otherwise
+        // there is nothing to do on this line.
+        if (openPara) break;
         consumed = true;
         break;
       }
@@ -2821,7 +2827,16 @@ function renderBlock(b, ctx, out, inTightList) {
     }
     case 'code': {
       let lit = '';
-      for (const l of b.lines) lit += l.s + (l.term ? '\n' : '');
+      for (let i = 0; i < b.lines.length; i++) {
+        const l = b.lines[i];
+        lit += l.s;
+        // A fenced block's last line, if blank, loses its newline when
+        // the block has a closing fence (the newline before the fence
+        // is not part of the content).
+        if (l.term && !(b.fenced && b.closed && i === b.lines.length - 1 && l.s === '')) {
+          lit += '\n';
+        }
+      }
       out.push('<pre><code');
       if (b.fenced && b.info) {
         let w = 0;
