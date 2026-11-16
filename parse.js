@@ -1293,6 +1293,9 @@ function parseInline(src, ctx) {
   // Once a link forms whose text held unmatched backtick runs, no
   // emphasis may form later on the SAME line (marked quirk).
   let noEmphasisUntil = -1;
+  // Whether any link with unmatched backtick runs formed earlier in
+  // this paragraph (on any line).
+  let sawBtLink = false;
 
   const flushText = (end) => {
     if (end > textStart) {
@@ -1363,6 +1366,19 @@ function parseInline(src, ctx) {
             if (br.active) {
               br.poisoned = true;
               br.poisonEnd = close + runLen;
+            }
+          }
+          // If a backtick-link formed earlier in this paragraph and
+          // an odd-inner code span appears on this line, emphasis on
+          // this line is suppressed (doc-09): disable delimiters
+          // already scanned on this line.
+          if (sawBtLink) {
+            const lineStart = src.lastIndexOf('\n', i) + 1;
+            for (const d of delimiters) {
+              if (d.pos >= lineStart) {
+                d.canOpen = false;
+                d.canClose = false;
+              }
             }
           }
         }
@@ -1605,6 +1621,7 @@ function parseInline(src, ctx) {
       if ((br.btRuns || 0) > 0) {
         const nl = src.indexOf('\n', linkEnd);
         noEmphasisUntil = nl >= 0 ? nl : n;
+        sawBtLink = true;
       } else {
         // A link without unmatched backticks clears the suppression.
         noEmphasisUntil = -1;
