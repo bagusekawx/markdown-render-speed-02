@@ -1,8 +1,8 @@
 # markdown-render-speed-02
 
-[![make.fun](https://make.fun/badge.svg)](https://make.fun/c/markdown-render-speed-02)
-[![bounty](https://make.fun/badge/bounty/markdown-render-speed-02.svg)](https://make.fun/c/markdown-render-speed-02)
-[![status](https://make.fun/badge/status/markdown-render-speed-02.svg)](https://make.fun/c/markdown-render-speed-02)
+[![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![rank](https://make.fun/badge/markdown-render-speed-02/bagusekawx/markdown-render-speed-02/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![reward](https://make.fun/badge/markdown-render-speed-02/bagusekawx/markdown-render-speed-02/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 
 A dependency-free, single-file Markdown renderer that matches
 [marked](https://github.com/markedjs/marked) 18.1.3 byte-for-byte on the
