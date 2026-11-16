@@ -1210,7 +1210,43 @@ function tryMatchDelim(items, oi) {
   const o = retry || nCp === r;
   let m = k;
   let f = 0;
+  // The scan skips a lone '*' inside a '__...__' pair (or a lone '_'
+  // inside a '**...**' pair) when the pair starts right after the opener:
+  // the scan regex consumes that span as plain text, so the delimiter
+  // inside it is never counted. Only the first such span counts.
+  let skipIdx = -1;
+  if (!isDel) {
+    const pair = r === 42 ? 95 : 42;
+    let j = oi + 1;
+    const advance = () => {
+      while (j < items.length) {
+        const it = items[j];
+        if (it !== null && typeof it === 'object' && it.d !== undefined && (it.d === 42 || it.d === 95)) return true;
+        if (it !== null && typeof it === 'object' && it.g !== undefined && (it.t.indexOf('*') !== -1 || it.t.indexOf('_') !== -1)) return false;
+        j++;
+      }
+      return false;
+    };
+    if (advance()) {
+      const open = items[j];
+      if (open.d === pair && open.n === 2) {
+        j++;
+        if (advance()) {
+          const mid = items[j];
+          if (mid.d === r && mid.n === 1) {
+            const midIdx = j;
+            j++;
+            if (advance()) {
+              const close = items[j];
+              if (close.d === pair && close.n === 2) skipIdx = midIdx;
+            }
+          }
+        }
+      }
+    }
+  }
   for (let ci = oi + 1; ci < items.length; ci++) {
+    if (ci === skipIdx) continue;
     const cand = items[ci];
     if (cand === null || typeof cand !== 'object' || cand.d !== r) continue;
     const b = cand.n;
