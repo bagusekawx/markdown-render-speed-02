@@ -2748,13 +2748,16 @@ function parseBlocks(lines, endsWithNL, ctx) {
               hasFence = true;
               break;
             }
-            // A top-level block start (heading, quote, list, HR) at
-            // an indent below the list pad, before any fence, means
-            // the code block is over.
+            // Once the list ends, a later line is a top-level block
+            // even if indented up to 3 spaces. A block start before
+            // any fence means the code block is over.
             const indK = indentFrom(lk, 0, 0, 0);
-            if (indK.indent >= brokeAtPad) continue;
+            if (indK.indent > 3) continue;
             const first = lk.charCodeAt(indK.offset);
-            if (first === 35 || first === 62 || first === 45 || first === 42 || first === 43) break;
+            const after = lk.charCodeAt(indK.offset + 1);
+            if (first === 62) break; // >
+            if (first === 35 && (after === 32 || after === 9 || indK.offset + 1 >= lk.length)) break; // # heading
+            if ((first === 45 || first === 42 || first === 43) && (after === 32 || after === 9)) break; // list marker
             if (first >= 48 && first <= 57) {
               const m = lk.slice(indK.offset).match(/^(\d+)[.)]\s/);
               if (m) break;
