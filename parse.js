@@ -1025,9 +1025,10 @@ function processEmphasis(delimiters) {
           // opener followed whitespace and whose closer precedes a
           // non-space (`*a **b**c*` stays literal, but `*a**b**c*` and
           // `*a **b** c*` form em). A _ em is not blocked by a **
-          // strong, and neither is an em whose closer is the same run
-          // that closed the strong (`***`).
-          if (use === 1 && tag === 5 && current.c === '*') {
+          // strong, neither is an em whose closer is the same run
+          // that closed the strong (`***`), nor one closed by a
+          // run of 3+ (`*a **b**c***` forms em).
+          if (use === 1 && tag === 5 && current.c === '*' && current.len === 1) {
             let blocked = false;
             let node = opener.n;
             while (node && node !== current) {
@@ -1078,6 +1079,51 @@ function processEmphasis(delimiters) {
             unlinkNode(current);
             break;
           }
+          // A closer with leftover delims moves inside the em/strong
+          // it just closed when the em/strong already holds an em or
+          // strong child and the text after the last such child has no
+          // leading space (`**a *b*c***` -> the * lands inside, but
+          // `**a *b* c***` leaves it outside). Only on the first match
+          // for this closer, only when no further opener of the same
+          // char is left, and at most 2 delims move in.
+          {
+            let hasEmChild = false;
+            let ch = em.ch;
+            while (ch) {
+              if (ch.t === 5 || ch.t === 6 || ch.t === 7) {
+                hasEmChild = true;
+                break;
+              }
+              ch = ch.n;
+            }
+            const last = em.cl;
+            const lastHasSpace =
+              last && last.t === 0 && last.s.charCodeAt(0) === 32;
+            let moreOpeners = false;
+            if (hasEmChild && !lastHasSpace && !current.didMatch) {
+              let o = openerPrev;
+              while (o) {
+                if (o.c === current.c && o.canOpen && o.par === current.par) {
+                  moreOpeners = true;
+                  break;
+                }
+                o = o.dprev;
+              }
+            }
+            if (hasEmChild && !lastHasSpace && !current.didMatch && !moreOpeners) {
+              if (current.len <= 2) {
+                unlinkNode(current);
+                appendNode(em, current);
+                current.par = em;
+              } else {
+                const txt = mkNode(0);
+                txt.s = current.c.repeat(2);
+                appendNode(em, txt);
+                current.len -= 2;
+              }
+            }
+          }
+          current.didMatch = true;
           // The same opener may match the same closer again (***foo***);
           // only advance when the opener was used up.
           if (openerGone) opener = openerPrev;
